@@ -165,6 +165,7 @@ test("Pi tool agent scopes MCP to its bridge and removes only its own configurat
   assert.equal(EAGER_PI_BRIDGE_TOOLS_CONFIG.pi__web_search?.eager, true);
   assert.equal(EAGER_PI_BRIDGE_TOOLS_CONFIG.pi__fetch_content?.eager, true);
   assert.equal(EAGER_PI_BRIDGE_TOOLS_CONFIG.pi__grep?.eager, true);
+  assert.equal(EAGER_PI_BRIDGE_TOOLS_CONFIG.pi__codemode?.eager, true);
   assert.equal(definition.mainAgent, true);
   assert.equal(definition.inheritCustomizations, false);
   assert.deepEqual(definition.mcpServers, [

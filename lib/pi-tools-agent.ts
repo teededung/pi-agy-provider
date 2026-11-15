@@ -20,6 +20,7 @@ export const EAGER_PI_BRIDGE_TOOLS = [
   "pi__get_search_content",
   "pi__source_check",
   "pi__x_search",
+  "pi__codemode",
 ] as const;
 
 /**
