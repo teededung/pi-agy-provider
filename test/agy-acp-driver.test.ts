@@ -2234,6 +2234,15 @@ test("AgyThoughtTracker emits native-style retrying status and runtime scales st
     ),
     "Stream interrupted (attempt 2/10), retrying in 4s",
   );
+  assert.equal(
+    formatAgyRetryStatus(
+      1,
+      10,
+      4,
+      "RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).",
+    ),
+    "Rate limited (429) (attempt 1/10), retrying in 4s",
+  );
   // Live countdown ticks down every second and switches to active status when remaining <= 0s
   assert.deepEqual(
     formatAgyLiveRetryLine(

@@ -52,8 +52,11 @@ export function resolveAgyRetryLabel(apiError?: string): string {
   ) {
     return "Stream interrupted";
   }
+  if (/\bRESOURCE_EXHAUSTED\b|\b429\b/i.test(apiError)) {
+    return "Rate limited (429)";
+  }
   if (
-    /\bUNAVAILABLE\b|\b503\b|\b502\b|\b504\b|\bNo capacity\b|\boverloaded\b|\bRESOURCE_EXHAUSTED\b|\b429\b/i.test(
+    /\bUNAVAILABLE\b|\b503\b|\b502\b|\b504\b|\bNo capacity\b|\boverloaded\b/i.test(
       apiError,
     )
   ) {
