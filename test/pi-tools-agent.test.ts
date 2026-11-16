@@ -37,6 +37,7 @@ import {
 import {
   AGY_CLAUDE_CONTEXT_LIMIT,
   AGY_EFFECTIVE_CONTEXT_LIMIT,
+  AGY_GEMINI4_CONTEXT_LIMIT,
   computeSessionUsageSnapshot,
   renderFooterLines,
   resolveAgyBranchContextTokens,
@@ -1017,13 +1018,16 @@ test("renderFooterLines renders 2-row footer with agy 300k context bar and filte
   assert.equal(lines.length, 2);
   assert.match(lines[0]!, /~\/Documents\/Repo\/ragnarok \(⎇ main\) • pi-agy/);
   assert.match(lines[0]!, /\(antigravity\) gemini-4-argon • medium$/);
-  assert.match(lines[1]!, /^\[█+░+\] ~228k\/300k \(76%\) │ ↑3\.5k ↓800 R226k CH98\.7% \$11\.16/);
+  assert.match(lines[1]!, /^\[█+░+\] ~228k\/512k \(45%\) │ ↑3\.5k ↓800 R226k CH98\.7% \$11\.16/);
   assert.match(lines[1]!, /\[42\.0 tok\/s\] pi-tools:on ○ 🐴 ponytail: 🌱 LITE$/);
   assert.equal(lines[1]!.includes("agy context"), false);
 
-  // Antigravity Claude Sonnet 5.5 and Opus 5.5 models render against their 1.0M context window,
-  // while Gemini models continue to use the 300k effective ceiling.
-  assert.equal(resolveAgyEffectiveContextLimit("gemini-4-argon"), AGY_EFFECTIVE_CONTEXT_LIMIT);
+  // Antigravity Gemini 4 models use the doubled 512k ceiling, Claude 4.6/4.8/5.5 uses 1.0M,
+  // and Gemini 3.x models remain on the 300k effective ceiling.
+  assert.equal(AGY_GEMINI4_CONTEXT_LIMIT, 512_000);
+  assert.equal(resolveAgyEffectiveContextLimit("gemini-4-argon"), AGY_GEMINI4_CONTEXT_LIMIT);
+  assert.equal(resolveAgyEffectiveContextLimit("gemini-4-carbon"), AGY_GEMINI4_CONTEXT_LIMIT);
+  assert.equal(resolveAgyEffectiveContextLimit("gemini-4-hydrogen-high"), AGY_GEMINI4_CONTEXT_LIMIT);
   assert.equal(resolveAgyEffectiveContextLimit("gemini-3.8-flash"), AGY_EFFECTIVE_CONTEXT_LIMIT);
   assert.equal(resolveAgyEffectiveContextLimit("claude-sonnet-5-5"), AGY_CLAUDE_CONTEXT_LIMIT);
   assert.equal(resolveAgyEffectiveContextLimit("claude-opus-5-5"), AGY_CLAUDE_CONTEXT_LIMIT);

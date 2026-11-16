@@ -4,12 +4,14 @@ import { AGY_COMPACTION_ENTRY } from "./agy-compaction.ts";
 import { AGY_CONVERSATION_STATE_ENTRY } from "./conversation-state.ts";
 
 /**
- * Effective native compaction ceiling in agy (~300k tokens for Gemini models;
+ * Effective native compaction ceiling in agy (~300k tokens for Gemini 3.x models;
+ * ~512k tokens for Gemini 4 models after Antigravity doubled their context window;
  * 1M total context window for Claude Sonnet/Opus 4.6 & 5.5 models).
  * Pi's model registry receives 1M (`AGY_PI_SCHEDULING_CONTEXT_WINDOW`) so
  * Pi never triggers client-side compaction ahead of agy's own native compaction.
  */
 export const AGY_EFFECTIVE_CONTEXT_LIMIT = 300_000;
+export const AGY_GEMINI4_CONTEXT_LIMIT = 512_000;
 export const AGY_CLAUDE_CONTEXT_LIMIT = 1_000_000;
 export const DEFAULT_CONTEXT_BAR_WIDTH = 16;
 export const MIN_CONTEXT_BAR_WIDTH = 6;
@@ -17,10 +19,17 @@ export const FOOTER_BRANCH_MAX_WIDTH = 28;
 export const FOOTER_SESSION_NAME_MAX_WIDTH = 28;
 
 const AGY_1M_CLAUDE_MODEL_RE = /^claude-(?:opus|sonnet)-(?:4-6|4-8|5-5)(?:$|[-@])/i;
+const AGY_GEMINI4_MODEL_RE = /^gemini-4(?:$|[-@.])/i;
 
 export function resolveAgyEffectiveContextLimit(modelId?: string): number {
-  if (typeof modelId === "string" && AGY_1M_CLAUDE_MODEL_RE.test(modelId.trim())) {
-    return AGY_CLAUDE_CONTEXT_LIMIT;
+  if (typeof modelId === "string") {
+    const trimmed = modelId.trim();
+    if (AGY_1M_CLAUDE_MODEL_RE.test(trimmed)) {
+      return AGY_CLAUDE_CONTEXT_LIMIT;
+    }
+    if (AGY_GEMINI4_MODEL_RE.test(trimmed)) {
+      return AGY_GEMINI4_CONTEXT_LIMIT;
+    }
   }
   return AGY_EFFECTIVE_CONTEXT_LIMIT;
 }
