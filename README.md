@@ -32,13 +32,15 @@ Update anytime with `pi update npm:pi-agy-provider`.
 
 > While `/swarm`, `/boost`, `/teamwork`, or subagents are streaming, pressing `Enter` routes side questions straight into `/btw` instead of stalling in the steer queue (`Alt+Enter` still queues a main-session follow-up).
 
+![/btw side conversation overlay and compact 2-row context footer](assets/btw-overlay.jpg)
+
 ## Commands
 
 | Command | Description |
 | --- | --- |
 | `/agy` | Active conversation ID, model, driver, tool mode, and context status |
 | `/agy-tools [on\|off\|status]` | Switch between **Pi tools mode** (default, routes work through Pi tools/MCP/permissions) and **native** `agy` tools |
-| `/agy-config` | Configure driver (`driver acp\|stream-json\|one-shot`) and 2-row custom context footer (`footer on\|off`) |
+| `/agy-config` | Configure driver (`driver acp\|stream-json\|one-shot`) and toggle the compact 2-row custom footer with context progress bar (`footer on\|off`) |
 | `/agy-login [method]` | Authenticate `agy` via ACP (`oauth-personal`, `oauth-business`, `gemini-api-key`, `agent-platform`, `status`) |
 | `/agy-usage` | Live 5-hour & weekly quota bars per model group (zero model tokens spent) |
 | `/agy-subagents [list]` | Interactive live worker & subagent inspector (plus real-time stack above editor) |
@@ -57,6 +59,7 @@ Update anytime with `pi update npm:pi-agy-provider`.
 - **Pi tools mode (`pi-tools:on`, default)**: `agy` runs with native tools disabled and calls your active Pi builtins, extensions, private skills, and MCP servers through a local loopback bridge so Pi's hooks and permissions apply.
 - **Native mode (`/agy-tools off`)**: `agy` uses its own built-in file/shell/browser tools (read-only steps render as native Pi cards; edits render unified diffs).
 - **Execution drivers (`/agy-config driver …`)**: Supports warm zero-respawn **`acp`** (native image blocks, live model discovery, cooperative cancel) and persistent **`stream-json`** RPC, with automatic compaction tracking and liveness-aware stall recovery.
+- **Compact 2-row footer (`/agy-config footer on|off`)**: Displays a clean context usage progress bar (`~tokens/limit %`), token/cache stats, model + thinking effort, and `pi-tools` state. Toggle this custom footer style anytime inside `/agy-config` (or `/agy-config footer off` if you prefer another footer extension).
 
 > [!WARNING]
 > In **native tool mode** (`/agy-tools off`), `agy` executes built-in file/shell/browser actions directly with `--dangerously-skip-permissions` before replaying cards to Pi. Keep `pi-tools:on` whenever you want tool calls gated by Pi's permission hooks.
