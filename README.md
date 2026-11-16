@@ -359,3 +359,11 @@ flowchart TB
 ## Release notes
 
 Release notes and logs: [changelog](https://github.com/teededung/pi-agy-provider/blob/main/CHANGELOG.md) · [GitHub releases](https://github.com/teededung/pi-agy-provider/releases)
+
+## More Pi Extensions
+
+| Package | Description | Install |
+| --- | --- | --- |
+| [pi-agy-provider](https://github.com/teededung/pi-agy-provider) | Antigravity (`agy`) provider & multi-agent orchestrator (`/swarm`, `/boost`, `/teamwork`, `/btw`) | `pi install npm:pi-agy-provider` |
+| [pi-md-render](https://github.com/teededung/pi-md-render) | Streaming-first rich Markdown, code, Mermaid & LaTeX rendering for the Pi TUI | `pi install npm:pi-md-render` |
+| [pi-session-sweep](https://github.com/teededung/pi-session-sweep) | Session management & cleanup with native `agy` conversation cleanup | `pi install npm:pi-session-sweep` |
