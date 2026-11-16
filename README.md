@@ -50,6 +50,8 @@ Update anytime with `pi update npm:pi-agy-provider`.
 | `/clear [prompt]` / `/agy-reset` | Reset both the `agy` conversation and Pi session (`/agy-reset` drops only the `agy` side) |
 | `/rename [name]` | Rename the Pi session and sync the title to `agy` conversation metadata |
 
+![Live 5-hour and weekly quota bars in /agy-usage](assets/agy-usage.png)
+
 ## Tool Modes & Drivers
 
 - **Pi tools mode (`pi-tools:on`, default)**: `agy` runs with native tools disabled and calls your active Pi builtins, extensions, private skills, and MCP servers through a local loopback bridge so Pi's hooks and permissions apply.

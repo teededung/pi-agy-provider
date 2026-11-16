@@ -28,6 +28,7 @@
     "src",
     "extensions",
     "skills",
+    "assets",
     "CHANGELOG.md"
   ],
   "pi": {
@@ -37,7 +38,8 @@
     ],
     "skills": [
       "./skills"
-    ]
+    ],
+    "image": "https://cdn.jsdelivr.net/gh/teededung/pi-agy-provider@main/assets/agy-usage.png"
   },
   "dependencies": {
     "effect": "4.0.5",
