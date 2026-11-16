@@ -367,3 +367,12 @@ Release notes and logs: [changelog](https://github.com/teededung/pi-agy-provider
 | [pi-agy-provider](https://github.com/teededung/pi-agy-provider) | Antigravity (`agy`) provider & multi-agent orchestrator (`/swarm`, `/boost`, `/teamwork`, `/btw`) | `pi install npm:pi-agy-provider` |
 | [pi-md-render](https://github.com/teededung/pi-md-render) | Streaming-first rich Markdown, code, Mermaid & LaTeX rendering for the Pi TUI | `pi install npm:pi-md-render` |
 | [pi-session-sweep](https://github.com/teededung/pi-session-sweep) | Session management & cleanup with native `agy` conversation cleanup | `pi install npm:pi-session-sweep` |
+
+## Credits
+
+`pi-agy-provider` started as an enhanced fork of [`@tian.zuo/pi-antigravity`](https://github.com/TianZuo555/pi-extensions#antigravity)
+by **Tian Zuo**. Full credit for the original Antigravity `agy` CLI provider foundation goes to the upstream project.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
