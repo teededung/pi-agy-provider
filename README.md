@@ -27,10 +27,12 @@ Update anytime with `pi update npm:pi-agy-provider`.
 | `/teamwork [idea]` | **Teamwork** | Two-phase workflow: refines `prompt_draft.md` with you first, then launches autonomous specialist teammates (`on\|off\|status`). |
 | `/goal <task>` | **Goal** | Autonomous multi-turn loop with self-auditing continuations until the objective completes (`/goal off\|status`). |
 | `/grill-me [plan]` | **Grill** | Dependency-ordered frontier design interview using interactive `ask_user_question` cards (or Markdown fallback) before coding (`/grill`, `on\|off\|status`). |
-| `/m <spec> <msg>` | **Consult** | One-shot consult with another model/effort without switching your session model, e.g. `/m opus3 review diff`, `/m argon1 quick check` (alias `/consult`). |
+| `/m <spec> <msg>` | **Consult** | One-shot consult with another model/effort (`1`=low, `2`=medium, `3`=high) without switching your session model, e.g. `/m flash1 commit and push`, `/m opus3 review diff` (alias `/consult`). |
 | `/btw [prompt]` | **Side chat** | Non-blocking side thread overlay in an isolated runtime (`Esc` / `Alt+m` to minimize, `Alt+/` to restore, `/btw:model`, `/btw:thinking`, `/btw:copy`, `/btw:new`). |
 
-> While `/swarm`, `/boost`, `/teamwork`, or subagents are streaming, pressing `Enter` routes side questions straight into `/btw` instead of stalling in the steer queue (`Alt+Enter` still queues a main-session follow-up).
+> **Tips:**
+> - **Save quota with `/m`:** Offload routine tasks like `/m flash1 commit and push` (Flash with `1` = low thinking) instead of burning your main model's quota, without switching your session model.
+> - **Non-blocking steer:** While `/swarm`, `/boost`, `/teamwork`, or subagents are streaming, pressing `Enter` routes side questions straight into `/btw` instead of stalling in the steer queue (`Alt+Enter` still queues a main-session follow-up).
 
 ![/btw side conversation overlay and compact 2-row context footer](assets/btw-overlay.jpg)
 
