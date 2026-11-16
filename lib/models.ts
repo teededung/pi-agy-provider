@@ -499,6 +499,35 @@ export function formatAgyConsultLabel(
   return `Consulted ${modelLabel}${effortPart}`;
 }
 
+const PI_COMPACTION_RESERVE_TOKENS = 16_384;
+
+function formatCompactTokenCount(tokens: number): string {
+  return tokens >= 1_000 ? `${Math.round(tokens / 1_000)}k` : `${tokens}`;
+}
+
+/**
+ * Format a short warning suffix for `/m` autocomplete when switching to a
+ * Pi-managed model whose context window would trigger immediate compaction.
+ */
+export function formatConsultCompactionWarning(
+  contextTokens: number | null | undefined,
+  targetContextWindow: number | null | undefined,
+  reserveTokens = PI_COMPACTION_RESERVE_TOKENS,
+): string {
+  if (
+    typeof contextTokens !== "number" ||
+    !Number.isFinite(contextTokens) ||
+    contextTokens <= 0 ||
+    typeof targetContextWindow !== "number" ||
+    !Number.isFinite(targetContextWindow) ||
+    targetContextWindow <= 0
+  ) {
+    return "";
+  }
+  if (contextTokens <= targetContextWindow - reserveTokens) return "";
+  return ` · ⚠ will compact (${formatCompactTokenCount(contextTokens)}/${formatCompactTokenCount(targetContextWindow)})`;
+}
+
 export function extractAgyConsultFooter(
   text: string,
   models: readonly AgyModelInfo[] = ALL_FALLBACK_MODELS,

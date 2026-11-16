@@ -104,6 +104,7 @@ import {
   capabilitiesForModel,
   FALLBACK_MODELS,
   formatAgyConsultLabel,
+  formatConsultCompactionWarning,
   getAgyConsultCompletions,
   isAgyModelHidden,
   mergeAgyModels,
@@ -4368,17 +4369,28 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
           currentEffort,
         ) ?? [];
       const prefix = argumentPrefix.trim().toLowerCase();
-      const probedOtherModels = activeSessionCtx
-        ? probeCtx(() => listOtherPiModels(activeSessionCtx!.modelRegistry))
+      const probedOtherState = activeSessionCtx
+        ? probeCtx(() => ({
+            models: listOtherPiModels(activeSessionCtx!.modelRegistry),
+            contextTokens: activeSessionCtx!.getContextUsage?.()?.tokens,
+          }))
         : undefined;
-      const otherItems = (
-        probedOtherModels && !probedOtherModels.stale ? probedOtherModels.value : []
-      )
-        .map((m) => ({
-          value: `${m.provider}/${m.id} `,
-          label: `${m.provider}/${m.id}`,
-          description: `${m.name || m.id} · pi model`,
-        }))
+      const otherState =
+        probedOtherState && !probedOtherState.stale
+          ? probedOtherState.value
+          : { models: [], contextTokens: undefined };
+      const otherItems = otherState.models
+        .map((m) => {
+          const warning = formatConsultCompactionWarning(
+            otherState.contextTokens,
+            m.contextWindow,
+          );
+          return {
+            value: `${m.provider}/${m.id} `,
+            label: `${m.provider}/${m.id}`,
+            description: `${m.name || m.id} · pi model${warning}`,
+          };
+        })
         .filter(
           (item) =>
             !prefix ||

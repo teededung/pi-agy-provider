@@ -69,6 +69,7 @@ import {
 import { AgyDriverSession } from "../lib/agy-driver.ts";
 import {
   ALL_FALLBACK_MODELS,
+  formatConsultCompactionWarning,
   getAgyConsultCompletions,
   mergeAgyModels,
   parseAgyModels,
@@ -1287,6 +1288,13 @@ test("resolveAgyConsultSpec supports model/thinking switch when allowEmptyPrompt
   assert.ok(completions && completions.length > 0);
   const opus2 = completions.find((item) => item.label === "opus2");
   const opus3 = completions.find((item) => item.label === "opus3");
+
+  assert.equal(formatConsultCompactionWarning(385_456, 272_000), " · ⚠ will compact (385k/272k)");
+  assert.equal(formatConsultCompactionWarning(385_456, 500_000), "");
+  assert.equal(formatConsultCompactionWarning(255_616, 272_000), "");
+  assert.equal(formatConsultCompactionWarning(255_617, 272_000), " · ⚠ will compact (256k/272k)");
+  assert.equal(formatConsultCompactionWarning(undefined, 272_000), "");
+  assert.equal(formatConsultCompactionWarning(385_456, undefined), "");
   assert.ok(opus2);
   assert.equal(opus3, undefined);
 });
