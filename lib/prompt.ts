@@ -496,6 +496,39 @@ export const TEAMWORK_DEACTIVATED_PROMPT =
   "Execute the request directly yourself using workspace tools and do NOT call `invoke_subagent` (including `teamwork_preview`), `send_message`, `manage_subagents`, or `schedule`. " +
   "Never fabricate or simulate `[]用户`, `<MESSAGE_RECEIVED>...</MESSAGE_RECEIVED>`, `<SYSTEM_MESSAGE>`, or subagent completion reports inside your response.]";
 
+/**
+ * System coordinator prompt for Antigravity's native `/swarm` mode
+ * (ported from `native_swarm/SKILL.md`). Because Pi passes `--disable-slash-commands`
+ * to `agy`, pi-agy expands `/swarm` into these coordinator instructions and clears
+ * custom-agent tool restrictions so `swarm`, `post_message`, `read_board`, `swarm_wait`
+ * are available natively alongside Pi bridge tools.
+ */
+export const SWARM_ORCHESTRATOR_PROMPT = `<SWARM>
+You are the **swarm coordinator** for this request.
+You orchestrate workers — each in its own conversation collaborating on one shared message board — using four native tools:
+- \`swarm\`: \`status\`, \`models\`, \`add\`, \`model\`, \`kill\`, \`title\`
+- \`post_message\`: post to the board (brief workers via \`@name ...\`)
+- \`read_board\`: read board posts (\`since\`, \`status\`)
+- \`swarm_wait\`: sleep until new posts arrive (costs nothing while waiting)
+
+Coordinator rules:
+1. **Do not do the technical work inline** (writing code, running long builds/searches/tests): delegate implementation, research, and verification to workers via \`swarm{action:"add", name:"<role>", brief:"..."}\` (split non-overlapping files/targets). Keep your turns short; answer the user cleanly.
+2. **Name the swarm** with \`swarm{action:"title", title:"..."}\` as soon as you know the task. Leave \`model\` off \`add\` unless the user requests a specific model. Every worker starts fresh — state in \`brief\` what it owns, what NOT to touch, and to post \`@coordinator [done] <summary>\` when finished (pass \`fork:"coordinator"\` or \`"<member>"\` if warm context is needed; pass \`workspace:"share"\` or \`"branch"\` for concurrent editors).
+3. Add \`verifier\` worker(s) to check diffs/tests (aim ~1 verifier per 2–4 authors). If \`swarm_monitor\` is in your skills, add \`swarm{action:"add", name:"monitor", brief:"You are this swarm's stall monitor. Load the swarm_monitor skill and follow it. Post only to break a stall."}\`.
+4. Never copy-paste one worker's report into another worker's post — refer to board posts by \`#seq\` (e.g. \`@verifier check #4 and #6\`).
+5. Loop with \`swarm{action:"status"}\`, \`read_board\`, \`post_message\`, and \`swarm_wait{since:<last seq>}\`. When the job is done, post \`[done] <summary>\` with no \`@\` on the board before reporting the final summary to the user.
+6. **Board UI in Pi**: Tell the user they can inspect the live swarm anytime via \`/swarm board\` or \`alt+s\` (do NOT emit \`sidecar://\` links).
+</SWARM>`;
+
+export const SWARM_CONTINUATION_PROMPT =
+  "[System note: Swarm mode (`<SWARM>`) remains active for this turn. " +
+  "Use `swarm{action:\"status\"}`, `read_board`, `post_message`, and `swarm_wait` to coordinate workers on the shared board; " +
+  "when finished, post `[done] <summary>` on the board and mention `/swarm board` (`alt+s`) instead of `sidecar://` links.]";
+
+export const SWARM_DEACTIVATED_PROMPT =
+  "[System note: Swarm mode is now OFF for this turn, superseding any earlier `<SWARM>` coordinator instructions in this conversation. " +
+  "Execute the request directly yourself using workspace tools and do NOT call `swarm`, `post_message`, `read_board`, or `swarm_wait`.]";
+
 export const GOAL_COMPLETE_MARKER = "<!-- GOAL_COMPLETE -->";
 export const GOAL_CANCELLED_MARKER = "<!-- GOAL_CANCELLED -->";
 

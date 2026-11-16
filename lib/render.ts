@@ -272,6 +272,46 @@ export function formatAgyCall(
       const taskText = task === undefined ? "" : theme.fg("accent", ` ${task}`);
       return `${label} ${actionText}${taskText}`;
     }
+    case "swarm": {
+      const action = pickArg(args, ["action", "Action"]);
+      const name = pickArg(args, ["name", "Name"]);
+      const title = pickArg(args, ["title", "Title"]);
+      const model = pickArg(args, ["model", "Model"]);
+      const parts = [
+        action ? theme.fg("accent", action) : undefined,
+        name ? theme.fg("accent", name) : undefined,
+        title ? theme.fg("accent", `"${title}"`) : undefined,
+        model ? theme.fg("dim", `(${model})`) : undefined,
+      ].filter(Boolean);
+      return parts.length > 0 ? `${label} ${parts.join(" ")}` : label;
+    }
+    case "post_message": {
+      const channel = pickArg(args, ["channel", "Channel"]);
+      const text = pickArg(args, ["text", "Text", "message", "Message"]);
+      const chanText = channel && channel !== "main" ? theme.fg("muted", `[${channel}] `) : "";
+      const preview = text ? (text.length > 72 ? `${text.slice(0, 71)}…` : text) : undefined;
+      return `${label} ${chanText}${preview === undefined ? invalid : theme.fg("accent", `"${preview.replace(/\s+/g, " ")}"`)}`;
+    }
+    case "read_board": {
+      const since = pickNum(args, ["since", "Since"]);
+      const channel = pickArg(args, ["channel", "Channel"]);
+      const statusOnly = args.status === true || args.Status === true;
+      const parts = [
+        statusOnly ? theme.fg("accent", "status") : undefined,
+        since !== undefined ? theme.fg("dim", `since #${since}`) : undefined,
+        channel ? theme.fg("muted", `[${channel}]`) : undefined,
+      ].filter(Boolean);
+      return parts.length > 0 ? `${label} ${parts.join(" ")}` : label;
+    }
+    case "swarm_wait": {
+      const since = pickNum(args, ["since", "Since"]);
+      const mentionsOnly = args.mentions_only === true || args.MentionsOnly === true;
+      const parts = [
+        since !== undefined ? theme.fg("dim", `since #${since}`) : undefined,
+        mentionsOnly ? theme.fg("muted", "mentions") : undefined,
+      ].filter(Boolean);
+      return parts.length > 0 ? `${label} ${parts.join(" ")}` : label;
+    }
       default: {
         const generic = formatGenericArgs(args, theme);
         return generic ? `${label} ${generic}` : label;

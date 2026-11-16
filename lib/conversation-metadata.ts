@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PI_TOOLS_AGENT_DESCRIPTION } from "./prompt.ts";
 import { EAGER_PI_BRIDGE_TOOLS, PI_TOOLS_AGENT_NATIVE_TOOLS } from "./pi-tools-agent.ts";
+import { collectSwarmMemberConversationIds } from "./swarm.ts";
 
 export const AGY_METADATA_MAX_BYTES = 5 * 1024 * 1024;
 
@@ -459,6 +460,14 @@ export async function deleteDisposableAgyConversation(
         }
       } catch {
         // No subagents directory for this conversation
+      }
+
+      const swarmChildren = await collectSwarmMemberConversationIds(
+        current,
+        path.join(baseDir, "brain"),
+      ).catch(() => []);
+      for (const childId of swarmChildren) {
+        if (!idsToDelete.has(childId)) queue.push(childId);
       }
 
       if (summaryDb) {

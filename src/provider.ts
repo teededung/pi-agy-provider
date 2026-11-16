@@ -70,6 +70,9 @@ import {
   GRILL_DEACTIVATED_PROMPT,
   omittedImagesPrompt,
   restoredPiContextPrompt,
+  SWARM_CONTINUATION_PROMPT,
+  SWARM_DEACTIVATED_PROMPT,
+  SWARM_ORCHESTRATOR_PROMPT,
   TEAMWORK_CONTINUATION_PROMPT,
   TEAMWORK_DEACTIVATED_PROMPT,
   TEAMWORK_ORCHESTRATOR_PROMPT,
@@ -1121,6 +1124,34 @@ export function contextHasPriorGrillActivity(messages: TranscriptContext["messag
   return false;
 }
 
+const SWARM_TOOL_NAMES = new Set(["swarm", "post_message", "read_board", "swarm_wait"]);
+
+export function contextHasPriorSwarmActivity(messages: TranscriptContext["messages"]): boolean {
+  for (const msg of messages) {
+    const text = messageUserText(msg);
+    if (text && (/^\/(?:agy-)?swarm\b/i.test(text.trim()) || text.includes("<SWARM>"))) {
+      return true;
+    }
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (!part || typeof part !== "object" || (part as { type?: unknown }).type !== "toolCall") {
+          continue;
+        }
+        const toolName = "name" in part && typeof part.name === "string" ? part.name : "";
+        const args =
+          "arguments" in part && part.arguments && typeof part.arguments === "object"
+            ? (part.arguments as Record<string, unknown>)
+            : undefined;
+        const innerTool = typeof args?.tool === "string" ? args.tool : "";
+        if (SWARM_TOOL_NAMES.has(toolName) || SWARM_TOOL_NAMES.has(innerTool)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 export interface AgySettledTurnOutcome {
   stopReason: AssistantMessage["stopReason"];
   responseText: string;
@@ -1181,14 +1212,18 @@ export function streamAntigravity(
   onGoalStarted?: (request: string, options?: { boost?: boolean }) => void,
   /** Whether `/grill-me` design interview mode is currently active. */
   isGrillActive?: () => boolean,
+  /** Whether `/swarm` coordinator mode is currently active. */
+  isSwarmActive?: () => boolean,
 ) {
   let hadBoostInConversation = false;
   let hadTeamworkInConversation = false;
   let hadGrillInConversation = false;
+  let hadSwarmInConversation = false;
   let currentTurnBatchStart = -1;
   let currentTurnHadBoostBefore = false;
   let currentTurnHadTeamworkBefore = false;
   let currentTurnHadGrillBefore = false;
+  let currentTurnHadSwarmBefore = false;
 
   return (
     model: Model<string>,
@@ -1321,16 +1356,19 @@ export function streamAntigravity(
         let isBoost = false;
         let isTeamwork = false;
         let isGrill = false;
+        let isSwarm = false;
         let isGoal = false;
         let explicitBoostCommand = false;
         let explicitTeamworkCommand = false;
         let explicitGrillCommand = false;
+        let explicitSwarmCommand = false;
         if (!isolatedRequest) {
           if (userBatch.start !== currentTurnBatchStart) {
             if (userBatch.start <= 0) {
               hadBoostInConversation = false;
               hadTeamworkInConversation = false;
               hadGrillInConversation = false;
+              hadSwarmInConversation = false;
             }
             currentTurnBatchStart = userBatch.start;
             currentTurnHadBoostBefore =
@@ -1345,6 +1383,10 @@ export function streamAntigravity(
               hadGrillInConversation ||
               (userBatch.start > 0 &&
                 contextHasPriorGrillActivity(context.messages.slice(0, userBatch.start)));
+            currentTurnHadSwarmBefore =
+              hadSwarmInConversation ||
+              (userBatch.start > 0 &&
+                contextHasPriorSwarmActivity(context.messages.slice(0, userBatch.start)));
           }
           if (/^\/(?:agy-)?goal\b/i.test(prompt)) {
             isGoal = true;
@@ -1357,6 +1399,14 @@ export function streamAntigravity(
             if (!prompt) {
               prompt =
                 "Grill mode is ready. Share the plan, idea, or design you want me to stress-test, and I will interview you until we reach a shared understanding.";
+            }
+          } else if (/^\/(?:agy-)?swarm\b/i.test(prompt)) {
+            isSwarm = true;
+            explicitSwarmCommand = true;
+            prompt = prompt.replace(/^\/(?:agy-)?swarm\s*/i, "").trim();
+            if (!prompt) {
+              prompt =
+                "Swarm mode is ready. Share the task you would like to split across parallel swarm workers on the shared message board.";
             }
           } else if (/^\/(?:agy-)?teamwork\b/i.test(prompt)) {
             isTeamwork = true;
@@ -1376,6 +1426,8 @@ export function streamAntigravity(
             }
           } else if (isGrillActive?.() && !isGoal) {
             isGrill = true;
+          } else if (isSwarmActive?.()) {
+            isSwarm = true;
           } else if (isTeamworkActive?.()) {
             isTeamwork = true;
           } else if (isBoostActive?.()) {
@@ -1396,6 +1448,9 @@ export function streamAntigravity(
           }
           if (isGrill) {
             hadGrillInConversation = true;
+          }
+          if (isSwarm) {
+            hadSwarmInConversation = true;
           }
           if (isTeamwork) {
             hadTeamworkInConversation = true;
@@ -1443,21 +1498,29 @@ export function streamAntigravity(
           ? explicitGrillCommand || !currentTurnHadGrillBefore
             ? `${buildGrillMePrompt({ useAskUserQuestion: canUseAskUserQuestion })}\n\n${prompt}`
             : `${buildGrillMeContinuationPrompt({ useAskUserQuestion: canUseAskUserQuestion })}\n\n${prompt}`
-          : isTeamwork
-            ? explicitTeamworkCommand || !currentTurnHadTeamworkBefore
-              ? `${TEAMWORK_ORCHESTRATOR_PROMPT}\n\n${prompt}`
-              : `${TEAMWORK_CONTINUATION_PROMPT}\n\n${prompt}`
-            : isBoost
-              ? `${BOOST_ORCHESTRATOR_PROMPT}\n\n${prompt}`
-              : !isolatedRequest && currentTurnHadTeamworkBefore
-                ? `${TEAMWORK_DEACTIVATED_PROMPT}\n\n${prompt}`
-                : !isolatedRequest && currentTurnHadBoostBefore
-                  ? `${BOOST_DEACTIVATED_PROMPT}\n\n${prompt}`
-                  : prompt;
-        const turnPrompt =
+          : isSwarm
+            ? explicitSwarmCommand || !currentTurnHadSwarmBefore
+              ? `${SWARM_ORCHESTRATOR_PROMPT}\n\n${prompt}`
+              : `${SWARM_CONTINUATION_PROMPT}\n\n${prompt}`
+            : isTeamwork
+              ? explicitTeamworkCommand || !currentTurnHadTeamworkBefore
+                ? `${TEAMWORK_ORCHESTRATOR_PROMPT}\n\n${prompt}`
+                : `${TEAMWORK_CONTINUATION_PROMPT}\n\n${prompt}`
+              : isBoost
+                ? `${BOOST_ORCHESTRATOR_PROMPT}\n\n${prompt}`
+                : !isolatedRequest && currentTurnHadTeamworkBefore
+                  ? `${TEAMWORK_DEACTIVATED_PROMPT}\n\n${prompt}`
+                  : !isolatedRequest && currentTurnHadBoostBefore
+                    ? `${BOOST_DEACTIVATED_PROMPT}\n\n${prompt}`
+                    : prompt;
+        const turnPromptWithGrill =
           !isolatedRequest && !isGrill && currentTurnHadGrillBefore
             ? `${GRILL_DEACTIVATED_PROMPT}\n\n${baseTurnPrompt}`
             : baseTurnPrompt;
+        const turnPrompt =
+          !isolatedRequest && !isSwarm && currentTurnHadSwarmBefore
+            ? `${SWARM_DEACTIVATED_PROMPT}\n\n${turnPromptWithGrill}`
+            : turnPromptWithGrill;
         const requestedEffort =
           consultOverride?.effort ?? mapThinkingToEffort(options?.reasoning);
         const effort = resolveAgyModelEffort(getModelInfo(effectiveModelId), requestedEffort);
@@ -1520,6 +1583,22 @@ export function streamAntigravity(
               ]
             : [];
 
+        let latestContextTokens: number | undefined;
+        for (let i = context.messages.length - 1; i >= 0; i -= 1) {
+          const msg = context.messages[i] as {
+            role?: string;
+            provider?: string;
+            usage?: { input?: number; cacheRead?: number };
+          };
+          if (msg.role === "assistant" && msg.provider === "antigravity" && msg.usage) {
+            const total = (msg.usage.input ?? 0) + (msg.usage.cacheRead ?? 0);
+            if (total > 0) {
+              latestContextTokens = total;
+              break;
+            }
+          }
+        }
+
         const controller = await turnRuntime.runPromise(
           turnService.beginStreamTurn({
             prompt: effectiveTurnPrompt,
@@ -1539,13 +1618,14 @@ export function streamAntigravity(
             // strip invoke_subagent/send_message/manage_subagents. Bypass custom agent
             // when Boost or Teamwork orchestration is active so subagent tools are available
             // alongside the Pi MCP bridge.
-            agent: isBoost || isTeamwork ? undefined : processProfile.agent,
+            agent: isBoost || isTeamwork || isSwarm ? undefined : processProfile.agent,
             mode: processProfile.mode,
             readOnlyPermissions,
             mcpDirectory: processProfile.mcpDirectory,
             bridgeRevision,
             signal: options?.signal,
-            timeoutMs: isTeamwork
+            contextTokens: latestContextTokens,
+            timeoutMs: isTeamwork || isSwarm
               ? 43_200_000
               : isBoost || isGoal || isGoalActive?.()
                 ? 7_200_000

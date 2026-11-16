@@ -197,7 +197,16 @@ import { wrapperToolActiveAfterModelSwitch } from "./lib/wrapper-activation.ts";
 import { openAgyTasksPicker } from "./src/tasks-ui.ts";
 import { openArtifact, openAgyArtifactsPicker } from "./src/artifacts-ui.ts";
 import { openAgySubagentsPicker } from "./src/subagents-ui.ts";
+import { openAgySwarmBoard } from "./src/swarm-ui.ts";
 import { openAgyUsagePicker } from "./src/usage-ui.ts";
+import {
+  buildSwarmCoordinatorWakePrompt,
+  findPendingSwarmCoordinatorWake,
+  formatSwarmTextSummary,
+  formatSwarmWidgetHint,
+  readAgySwarmSnapshot,
+  type AgySwarmSnapshot,
+} from "./lib/swarm.ts";
 import { agyToolLabel, cleanToolOutputLines, formatAgyCall, summarizeAgyResult } from "./lib/render.ts";
 import {
   AGY_TOOL_SUMMARIES_ENTRY,
@@ -623,6 +632,9 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
   let oneShotTeamwork = false;
   let sessionGrillMode = false;
   let oneShotGrill = false;
+  let sessionSwarmMode = false;
+  let oneShotSwarm = false;
+  const lastSwarmWakeSeqBySwarm = new Map<string, number>();
   let teamworkLaunchedThisTurn = false;
   let subagentSpawnedThisTurn = false;
   let lastSettledSpawnedSubagent = false;
@@ -694,6 +706,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     sessionBoostMode || oneShotBoost || Boolean(activeGoal?.boost);
   const isTeamworkActive = (): boolean => sessionTeamworkMode || oneShotTeamwork;
   const isGrillActive = (): boolean => sessionGrillMode || oneShotGrill;
+  const isSwarmActive = (): boolean => sessionSwarmMode || oneShotSwarm;
   const isGoalActive = (): boolean => Boolean(activeGoal);
   const getOneShotConsult = (): OneShotConsultOverride | undefined => oneShotConsult;
 
@@ -709,6 +722,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
         ui.setStatus("agy-boost", undefined);
         ui.setStatus("agy-teamwork", undefined);
         ui.setStatus("agy-grill", undefined);
+        ui.setStatus("agy-swarm", undefined);
         ui.setStatus("agy-goal", undefined);
         return;
       }
@@ -723,6 +737,10 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       ui.setStatus(
         "agy-grill",
         isGrillActive() ? ui.theme.fg("accent", "[grill]\u00A0") : undefined,
+      );
+      ui.setStatus(
+        "agy-swarm",
+        isSwarmActive() ? ui.theme.fg("accent", "[swarm]\u00A0") : undefined,
       );
       const goalBadge = activeGoal
         ? activeGoal.paused
@@ -1304,10 +1322,12 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
   let tasksSessionCwd: string | undefined;
   let widgetLiveCount = -1;
   let widgetArtifactCount = -1;
+  let latestSwarmSnapshot: AgySwarmSnapshot | undefined;
   let lastRenderedLive = -1;
   let lastRenderedArtifacts = -1;
   let lastRenderedSubagents = -1;
   let lastRenderedSubagentSummary = "";
+  let lastRenderedSwarmKey = "";
   let widgetScanInFlight = false;
   let widgetScanQueued = false;
   let agyAgentActive = false;
@@ -1384,24 +1404,29 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
   }
 
   /** Slash commands shown in the status widget; clickable in fullscreen mode. */
-  const AGY_WIDGET_COMMANDS = ["/agy-tasks", "/agy-artifacts", "/agy-subagents"];
+  const AGY_WIDGET_COMMANDS = ["/agy-tasks", "/agy-artifacts", "/agy-subagents", "/swarm board"];
 
   function renderAgyStatusWidget(force = false): void {
     if (!tasksUi) return;
     const liveTasks = Math.max(0, widgetLiveCount);
     const artifacts = Math.max(0, widgetArtifactCount);
     const subagents = subagentRoster.size;
+    const swarm = latestSwarmSnapshot;
     const now = Date.now();
     const liveSubSummary = summarizeAgySubagentsWidget(subagentRoster, now);
     const livePreviewPlain = formatAgySubagentsLivePreviewLines(subagentRoster, now);
     const subagentSummary = [liveSubSummary ?? "", ...livePreviewPlain].join("\n");
+    const swarmKey = swarm
+      ? `${swarm.swarmId}:${swarm.title}:${swarm.headSeq}:${swarm.workingCount}:${swarm.waitingCount}:${swarm.done}:${swarm.newestUpdateMs}`
+      : "";
 
     if (
       !force &&
       liveTasks === lastRenderedLive &&
       artifacts === lastRenderedArtifacts &&
       subagents === lastRenderedSubagents &&
-      subagentSummary === lastRenderedSubagentSummary
+      subagentSummary === lastRenderedSubagentSummary &&
+      swarmKey === lastRenderedSwarmKey
     ) {
       return;
     }
@@ -1409,12 +1434,13 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     lastRenderedArtifacts = artifacts;
     lastRenderedSubagents = subagents;
     lastRenderedSubagentSummary = subagentSummary;
+    lastRenderedSwarmKey = swarmKey;
 
     try {
       tasksUi.setWidget(AGY_TASKS_WIDGET_KEY, undefined);
       tasksUi.setWidget(AGY_ARTIFACTS_WIDGET_KEY, undefined);
 
-      if (liveTasks === 0 && artifacts === 0 && subagents === 0) {
+      if (liveTasks === 0 && artifacts === 0 && subagents === 0 && !swarm) {
         tasksUi.setWidget(AGY_STATUS_WIDGET_KEY, undefined);
         return;
       }
@@ -1430,6 +1456,9 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
               theme,
             ).map((line) => truncateToWidth(line, width, ""));
             const items: string[] = [];
+            if (swarm) {
+              items.push(formatSwarmWidgetHint(swarm, theme));
+            }
             if (liveTasks > 0) {
               items.push(
                 theme.fg("warning", "■ ") +
@@ -1541,8 +1570,9 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
   }
 
   function reconcileWidgetPolling(): void {
+    const hasActiveSwarm = Boolean(latestSwarmSnapshot && !latestSwarmSnapshot.done);
     const shouldPoll = Boolean(
-      tasksUi && (agyAgentActive || widgetLiveCount > 0 || hasRunningSubagent()),
+      tasksUi && (agyAgentActive || widgetLiveCount > 0 || hasRunningSubagent() || hasActiveSwarm),
     );
     if (shouldPoll && !widgetPollTimer) {
       widgetPollTimer = setInterval(updateAgyTasksWidget, WIDGET_POLL_MS);
@@ -1550,6 +1580,27 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     } else if (!shouldPoll && widgetPollTimer) {
       clearInterval(widgetPollTimer);
       widgetPollTimer = undefined;
+    }
+  }
+
+  function maybeWakeSwarmCoordinator(swarm: AgySwarmSnapshot | undefined): void {
+    if (!swarm || agyAgentActive || !isSwarmActive()) return;
+    const ctx = activeSessionCtx;
+    if (!ctx) return;
+    const providerProbe = probeCtx(() => ctx.model?.provider);
+    if (providerProbe.stale || providerProbe.value !== "antigravity") return;
+    const idleProbe = probeCtx(() => ctx.isIdle());
+    if (idleProbe.stale || !idleProbe.value) return;
+
+    const lastWokenSeq = lastSwarmWakeSeqBySwarm.get(swarm.swarmId) ?? 0;
+    const wake = findPendingSwarmCoordinatorWake(swarm, lastWokenSeq);
+    if (!wake) return;
+
+    lastSwarmWakeSeqBySwarm.set(swarm.swarmId, wake.maxSeq);
+    try {
+      pi.sendUserMessage(buildSwarmCoordinatorWakePrompt(swarm, wake));
+    } catch {
+      // Ignore if session tore down between idle check and dispatch.
     }
   }
 
@@ -1565,27 +1616,31 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       try {
         const snapshot = await runAntigravity(runtime, service.snapshot);
         if (!snapshot.conversationId) {
+          latestSwarmSnapshot = undefined;
           setAgyTasksWidget(0);
           setAgyArtifactsWidget(0);
           return;
         }
-        const [tasks, artifacts] = await Promise.all([
+        const [tasks, artifacts, _rosterUpdated, swarm] = await Promise.all([
           listAgyTasks(snapshot.conversationId, {
             sessionCwd: tasksSessionCwd,
             agyPids: [...getAgyChildrenRegistry().live],
           }),
           listAgyArtifacts(snapshot.conversationId),
           syncAgySubagentRoster(subagentRoster, snapshot.conversationId).catch(() => false),
+          readAgySwarmSnapshot(snapshot.conversationId).catch(() => undefined),
         ]);
+        latestSwarmSnapshot = swarm;
         setAgyTasksWidget(
           tasks.filter(
             (task) => task.pids.length > 0 || task.orphans.length > 0 || task.ambiguous.length > 0,
           ).length,
         );
         setAgyArtifactsWidget(artifacts.length);
-        if (subagentRoster.size > 0) {
+        if (subagentRoster.size > 0 || swarm || lastRenderedSwarmKey) {
           renderAgyStatusWidget();
         }
+        maybeWakeSwarmCoordinator(swarm);
       } catch {
         // Runtime closed or scan failed; leave the widget as-is.
       } finally {
@@ -2024,6 +2079,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
           updateOrchestrationStatus(tasksUi);
         },
         isGrillActive,
+        isSwarmActive,
       ),
     });
   };
@@ -2078,6 +2134,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       agyAgentActive,
       isBoostActive: isBoostActive(),
       isTeamworkActive: isTeamworkActive(),
+      isSwarmActive: isSwarmActive(),
       subagentSpawnedThisTurn,
     });
     if (!intercepted) {
@@ -2194,7 +2251,29 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
         branchInfo.text || settledOutcome?.responseText || "",
       );
     }
-    if (hadOneShotBoost || teamworkLaunchedThisTurn || grillCompleted) {
+    let swarmCompleted = false;
+    if (oneShotSwarm && !sessionSwarmMode) {
+      try {
+        const snap = await runAntigravity(runtime, service.snapshot);
+        if (snap.conversationId) {
+          const swarm = await readAgySwarmSnapshot(snap.conversationId).catch(() => undefined);
+          if (swarm) latestSwarmSnapshot = swarm;
+          if (!swarm || swarm.done) swarmCompleted = true;
+        } else {
+          swarmCompleted = true;
+        }
+      } catch {
+        // Ignore snapshot errors on turn settlement
+      }
+    }
+    if (event.aborted && latestSwarmSnapshot) {
+      const prev = lastSwarmWakeSeqBySwarm.get(latestSwarmSnapshot.swarmId) ?? 0;
+      lastSwarmWakeSeqBySwarm.set(
+        latestSwarmSnapshot.swarmId,
+        Math.max(prev, latestSwarmSnapshot.headSeq),
+      );
+    }
+    if (hadOneShotBoost || teamworkLaunchedThisTurn || grillCompleted || swarmCompleted) {
       if (teamworkLaunchedThisTurn) {
         teamworkLaunchedThisTurn = false;
         oneShotTeamwork = false;
@@ -2203,6 +2282,9 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       if (grillCompleted) {
         oneShotGrill = false;
         sessionGrillMode = false;
+      }
+      if (swarmCompleted) {
+        oneShotSwarm = false;
       }
       const ui = probeCtx(() => ctx.ui);
       if (!ui.stale && ui.value) updateOrchestrationStatus(ui.value);
@@ -2354,6 +2436,10 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     oneShotBoost = false;
     oneShotTeamwork = false;
     oneShotGrill = false;
+    oneShotSwarm = false;
+    latestSwarmSnapshot = undefined;
+    lastRenderedSwarmKey = "";
+    lastSwarmWakeSeqBySwarm.clear();
     teamworkLaunchedThisTurn = false;
     persistedGoalKey = undefined;
     const restoredGoal =
@@ -2381,6 +2467,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       sessionBoostMode = false;
       sessionTeamworkMode = false;
       sessionGrillMode = false;
+      sessionSwarmMode = false;
     }
     ensureSessionNamePolling();
     syncWrapperToolActivation(ctx.model?.provider);
@@ -2706,9 +2793,11 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     tasksUi = undefined;
     widgetLiveCount = -1;
     widgetArtifactCount = -1;
+    latestSwarmSnapshot = undefined;
     lastRenderedLive = -1;
     lastRenderedArtifacts = -1;
     lastRenderedSubagents = -1;
+    lastRenderedSwarmKey = "";
     subagentRoster.clear();
     widgetScanInFlight = false;
     try {
@@ -2805,7 +2894,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       try {
         const configured = readAgyProcessProfile();
         const agent = getToolMode() === "pi" ? piToolsAgent.name : configured.agent;
-        const boostState = ` · boost: ${sessionBoostMode ? "ON" : "OFF"} · teamwork: ${isTeamworkActive() ? "ON" : "OFF"} · grill: ${isGrillActive() ? "ON" : "OFF"}`;
+        const boostState = ` · boost: ${sessionBoostMode ? "ON" : "OFF"} · teamwork: ${isTeamworkActive() ? "ON" : "OFF"} · grill: ${isGrillActive() ? "ON" : "OFF"} · swarm: ${isSwarmActive() ? "ON" : "OFF"}`;
         profile = `agent: ${agent ?? "none"} · mode: ${configured.mode ?? "default"} · tools: ${getToolMode()} · footer: ${getFooterMode()}${boostState}`;
       } catch (error) {
         profile = `profile error: ${error instanceof Error ? error.message : String(error)}`;
@@ -3109,9 +3198,13 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       oneShotBoost = false;
       oneShotTeamwork = false;
       oneShotGrill = false;
+      oneShotSwarm = false;
+      latestSwarmSnapshot = undefined;
+      lastSwarmWakeSeqBySwarm.clear();
       teamworkLaunchedThisTurn = false;
       sessionTeamworkMode = false;
       sessionGrillMode = false;
+      sessionSwarmMode = false;
       activeGoal = undefined;
       persistGoalState(ctx);
       updateOrchestrationStatus(ctx.ui);
@@ -3133,9 +3226,13 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       oneShotBoost = false;
       oneShotTeamwork = false;
       oneShotGrill = false;
+      oneShotSwarm = false;
+      latestSwarmSnapshot = undefined;
+      lastSwarmWakeSeqBySwarm.clear();
       teamworkLaunchedThisTurn = false;
       sessionTeamworkMode = false;
       sessionGrillMode = false;
+      sessionSwarmMode = false;
       activeGoal = undefined;
       persistedGoalKey = undefined;
       updateOrchestrationStatus(ctx.ui);
@@ -3656,6 +3753,8 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
           oneShotTeamwork = false;
           sessionGrillMode = false;
           oneShotGrill = false;
+          sessionSwarmMode = false;
+          oneShotSwarm = false;
         }
       } else {
         sessionTeamworkMode = next;
@@ -3665,6 +3764,8 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
           oneShotBoost = false;
           sessionGrillMode = false;
           oneShotGrill = false;
+          sessionSwarmMode = false;
+          oneShotSwarm = false;
           if (activeGoal) activeGoal.boost = false;
         }
       }
@@ -3698,6 +3799,8 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       oneShotTeamwork = false;
       sessionGrillMode = false;
       oneShotGrill = false;
+      sessionSwarmMode = false;
+      oneShotSwarm = false;
       updateOrchestrationStatus(ctx.ui);
       if (ctx.isIdle()) {
         pi.sendUserMessage(`/boost ${trimmed}`);
@@ -3715,6 +3818,8 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     oneShotBoost = false;
     sessionGrillMode = false;
     oneShotGrill = false;
+    sessionSwarmMode = false;
+    oneShotSwarm = false;
     updateOrchestrationStatus(ctx.ui);
     if (ctx.isIdle()) {
       pi.sendUserMessage(`/teamwork ${trimmed}`);
@@ -3743,6 +3848,8 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
         oneShotBoost = false;
         sessionTeamworkMode = false;
         oneShotTeamwork = false;
+        sessionSwarmMode = false;
+        oneShotSwarm = false;
         if (activeGoal) activeGoal.boost = false;
       }
       updateOrchestrationStatus(ctx.ui);
@@ -3775,6 +3882,8 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     oneShotBoost = false;
     sessionTeamworkMode = false;
     oneShotTeamwork = false;
+    sessionSwarmMode = false;
+    oneShotSwarm = false;
     updateOrchestrationStatus(ctx.ui);
     if (ctx.isIdle()) {
       pi.sendUserMessage(`/grill-me ${trimmed}`);
@@ -3829,6 +3938,162 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       "Stress-test a plan or design through dependency-ordered frontier interview rounds (alias for /grill-me)",
     getArgumentCompletions: toggleCommandCompletions,
     handler: handleGrillCommand,
+  });
+
+  const openSwarmBoardForCtx = async (ctx: ExtensionCommandContext, textMode = false): Promise<void> => {
+    const snapshot = await runAntigravity(runtime, service.snapshot);
+    const swarm = snapshot.conversationId
+      ? await readAgySwarmSnapshot(snapshot.conversationId, { scanParentSwarms: true }).catch(
+          () => undefined,
+        )
+      : undefined;
+    if (!swarm) {
+      ctx.ui.notify('No swarm in this conversation yet. Start one with "/swarm <task>".', "info");
+      return;
+    }
+    latestSwarmSnapshot = swarm;
+    renderAgyStatusWidget();
+    if (textMode || !ctx.hasUI) {
+      ctx.ui.notify(formatSwarmTextSummary(swarm), "info");
+      return;
+    }
+    const rescan = async () => {
+      const snap = await runAntigravity(runtime, service.snapshot).catch(() => undefined);
+      if (!snap?.conversationId) return undefined;
+      const next = await readAgySwarmSnapshot(snap.conversationId, {
+        scanParentSwarms: true,
+      }).catch(() => undefined);
+      if (next) {
+        latestSwarmSnapshot = next;
+        renderAgyStatusWidget();
+      }
+      return next;
+    };
+    await openAgySwarmBoard(ctx, swarm, rescan);
+    renderAgyStatusWidget();
+  };
+
+  const swarmCommandCompletions = (prefix: string) =>
+    ["board", "on", "off", "status"]
+      .filter((value) => value.startsWith(prefix))
+      .map((value) => ({ value, label: value }));
+
+  const handleSwarmCommand = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+    const trimmed = args.trim();
+    if (/^board(?:\s+(?:text|list))?$/i.test(trimmed)) {
+      const textMode = /\b(?:text|list)$/i.test(trimmed);
+      await openSwarmBoardForCtx(ctx, textMode);
+      return;
+    }
+    if (!trimmed) {
+      const snap = await runAntigravity(runtime, service.snapshot).catch(() => undefined);
+      const existing = snap?.conversationId
+        ? await readAgySwarmSnapshot(snap.conversationId, { scanParentSwarms: true }).catch(
+            () => undefined,
+          )
+        : undefined;
+      if (existing) {
+        await openSwarmBoardForCtx(ctx);
+        return;
+      }
+      const next = !isSwarmActive();
+      sessionSwarmMode = next;
+      if (!next) oneShotSwarm = false;
+      if (next) {
+        sessionBoostMode = false;
+        oneShotBoost = false;
+        sessionTeamworkMode = false;
+        oneShotTeamwork = false;
+        sessionGrillMode = false;
+        oneShotGrill = false;
+        if (activeGoal) activeGoal.boost = false;
+      }
+      updateOrchestrationStatus(ctx.ui);
+      ctx.ui.notify(
+        next
+          ? "Swarm mode enabled — share a task to launch parallel swarm workers (/swarm board to view, /swarm off to exit)."
+          : "Swarm mode disabled.",
+        "info",
+      );
+      return;
+    }
+    if (/^(on|enable|true)$/i.test(trimmed)) {
+      sessionSwarmMode = true;
+      sessionBoostMode = false;
+      oneShotBoost = false;
+      sessionTeamworkMode = false;
+      oneShotTeamwork = false;
+      sessionGrillMode = false;
+      oneShotGrill = false;
+      if (activeGoal) activeGoal.boost = false;
+      updateOrchestrationStatus(ctx.ui);
+      ctx.ui.notify("Swarm mode enabled (/swarm <task> to start, /swarm board to view).", "info");
+      return;
+    }
+    if (/^(off|disable|false)$/i.test(trimmed)) {
+      sessionSwarmMode = false;
+      oneShotSwarm = false;
+      updateOrchestrationStatus(ctx.ui);
+      ctx.ui.notify("Swarm mode disabled.", "info");
+      return;
+    }
+    if (/^status$/i.test(trimmed)) {
+      const snap = await runAntigravity(runtime, service.snapshot).catch(() => undefined);
+      const swarm = snap?.conversationId
+        ? await readAgySwarmSnapshot(snap.conversationId, { scanParentSwarms: true }).catch(
+            () => undefined,
+          )
+        : undefined;
+      if (swarm) {
+        ctx.ui.notify(formatSwarmTextSummary(swarm), "info");
+      } else {
+        ctx.ui.notify(`Swarm mode is currently ${isSwarmActive() ? "ON" : "OFF"}.`, "info");
+      }
+      return;
+    }
+
+    oneShotSwarm = true;
+    sessionBoostMode = false;
+    oneShotBoost = false;
+    sessionTeamworkMode = false;
+    oneShotTeamwork = false;
+    sessionGrillMode = false;
+    oneShotGrill = false;
+    updateOrchestrationStatus(ctx.ui);
+    if (ctx.isIdle()) {
+      pi.sendUserMessage(`/swarm ${trimmed}`);
+    } else {
+      pi.sendUserMessage(`/swarm ${trimmed}`, { deliverAs: "followUp" });
+      ctx.ui.notify("Swarm task queued as follow-up.", "info");
+    }
+  };
+
+  pi.registerCommand("swarm", {
+    description:
+      "(Preview & Quota Heavy) Run a native multi-agent swarm on a shared board (/swarm <task>, /swarm board, /swarm on|off|status)",
+    getArgumentCompletions: swarmCommandCompletions,
+    handler: handleSwarmCommand,
+  });
+
+  pi.registerCommand("agy-swarm", {
+    description:
+      "(Preview & Quota Heavy) Run a native multi-agent swarm on a shared board (alias for /swarm)",
+    getArgumentCompletions: swarmCommandCompletions,
+    handler: handleSwarmCommand,
+  });
+
+  pi.registerCommand("swarm-board", {
+    description: "Open the interactive live /swarm board for the current conversation",
+    handler: async (args, ctx) => {
+      await openSwarmBoardForCtx(ctx, /\b(?:text|list)\b/i.test(args));
+    },
+  });
+
+  pi.registerShortcut("alt+s", {
+    description: "Open the live Antigravity /swarm board",
+    handler: async (ctx) => {
+      await openSwarmBoardForCtx(ctx as unknown as ExtensionCommandContext);
+    },
   });
 
   const goalCommandCompletions = (prefix: string) =>

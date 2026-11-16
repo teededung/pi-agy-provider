@@ -117,6 +117,8 @@ function waitForRetryBackoff(ms: number, signal: AbortSignal): Promise<boolean> 
 }
 
 const DEFAULT_STALL_TIMEOUT_MS = 90_000;
+const LARGE_CONTEXT_STALL_THRESHOLD_TOKENS = 250_000;
+const LARGE_CONTEXT_STALL_TIMEOUT_MS = 180_000;
 export const DEFAULT_STALL_RETRY_BACKOFF_MS = 3_000;
 const MAX_STALL_RETRY_BACKOFF_MS = 30_000;
 /** 9 retries after initial attempt #1 = 10 total attempts (`attempt 2/10 .. 10/10`), matching native `agy`. */
@@ -211,6 +213,8 @@ export interface AntigravityRuntimeShape {
     readonly bridgeRevision?: string;
     readonly signal?: AbortSignal;
     readonly timeoutMs?: number;
+    /** Latest observed branch context footprint (`input + cacheRead`), used to scale prefill stall budget. */
+    readonly contextTokens?: number;
   }) => Effect.Effect<AgyTurnController, AntigravityRuntimeClosedError>;
   /** Clear the active controller once a provider turn reached a terminal state. */
   readonly finishTurn: Effect.Effect<void>;
@@ -543,7 +547,12 @@ const makeRuntime = (
                 timeoutMs,
                 inactivityTimeoutMs: envInt(
                   "AGY_STALL_TIMEOUT_MS",
-                  runtimeSettings.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS,
+                  (request.contextTokens ?? 0) >= LARGE_CONTEXT_STALL_THRESHOLD_TOKENS
+                    ? Math.max(
+                        runtimeSettings.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS,
+                        LARGE_CONTEXT_STALL_TIMEOUT_MS,
+                      )
+                    : (runtimeSettings.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS),
                 ),
                 toolInactivityTimeoutMs: envInt(
                   "AGY_TOOL_STALL_TIMEOUT_MS",

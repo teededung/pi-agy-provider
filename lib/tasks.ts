@@ -49,6 +49,7 @@ import {
   verifyAgyOrphans,
   type AgyProcessRow,
 } from "./agy-children.ts";
+import { agyProbeSwarm } from "./swarm.ts";
 
 export { parseAgyProcessRows, parseEtimeMs, type AgyProcessRow } from "./agy-children.ts";
 
@@ -679,11 +680,17 @@ export async function agyProbeSubagents(
     }
   }
 
+  const swarmProbe = await agyProbeSwarm(conversationId, rootBrain).catch(() => ({
+    hasAlive: false,
+    aliveCount: 0,
+    newestUpdateMs: 0,
+  }));
+
   return {
-    hasAlive: aliveConversationIds.length > 0,
-    aliveCount: aliveConversationIds.length,
+    hasAlive: aliveConversationIds.length > 0 || swarmProbe.hasAlive,
+    aliveCount: aliveConversationIds.length + swarmProbe.aliveCount,
     aliveConversationIds,
-    newestUpdateMs,
+    newestUpdateMs: Math.max(newestUpdateMs, swarmProbe.newestUpdateMs),
   };
 }
 

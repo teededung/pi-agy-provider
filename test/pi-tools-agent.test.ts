@@ -709,6 +709,14 @@ test("shouldInterceptSubagentSteerInput routes interactive Enter steer to /btw o
     }),
     "what does this helper do?",
   );
+  assert.equal(
+    shouldInterceptSubagentSteerInput({
+      ...base,
+      isBoostActive: false,
+      isSwarmActive: true,
+    }),
+    "what does this helper do?",
+  );
 
   // Alt+Enter follow-up still queues for the main session
   assert.equal(
@@ -1604,6 +1612,61 @@ test("AntigravityRuntime resends user prompt when a resumed conversation stalls 
   // Attempt 3 (retry after post-init stall) uses the continuation prompt without duplicating the user prompt.
   assert.match(prompts[2]!, /The stream was interrupted before your previous turn completed/);
   assert.doesNotMatch(prompts[2]!, /Here is a side conversation I had for additional context/);
+});
+
+test("beginStreamTurn scales inactivityTimeoutMs for large context (>=250k) unless overridden by env", async (t) => {
+  const prevDir = process.env.PI_CODING_AGENT_DIR;
+  const prevEnv = process.env.AGY_STALL_TIMEOUT_MS;
+  const tempAgentDir = await mkdtemp(path.join(tmpdir(), "pi-agy-stall-scale-"));
+  process.env.PI_CODING_AGENT_DIR = tempAgentDir;
+  delete process.env.AGY_STALL_TIMEOUT_MS;
+  t.after(async () => {
+    if (prevDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prevDir;
+    if (prevEnv === undefined) delete process.env.AGY_STALL_TIMEOUT_MS;
+    else process.env.AGY_STALL_TIMEOUT_MS = prevEnv;
+    await rm(tempAgentDir, { recursive: true, force: true });
+  });
+
+  const seenInactivityMs: Array<number | undefined> = [];
+  const runtime = createAntigravityRuntime(async (request) => {
+    seenInactivityMs.push(request.inactivityTimeoutMs);
+    const result: AgyActivity = {
+      type: "result",
+      status: "OK",
+      response: "ok",
+      usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
+    };
+    request.onActivity?.(result);
+    return {
+      conversationId: "conv-scale-timeout",
+      status: "OK",
+      response: "ok",
+      activities: [result],
+      usage: result.usage,
+      finished: true,
+    };
+  });
+  t.after(() => runtime.dispose());
+
+  const service = runtime.runSync(AntigravityRuntime);
+  await runtime.runPromise(service.setSession("/tmp/ws", "gemini-4-hydrogen", false));
+
+  for (const contextTokens of [120_000, 280_000]) {
+    const controller = await runtime.runPromise(
+      service.beginStreamTurn({
+        prompt: "hi",
+        modelId: "gemini-4-hydrogen",
+        contextTokens,
+      }),
+    );
+    while ((await controller.next()) !== null) {
+      // consume
+    }
+    await runtime.runPromise(service.finishTurn);
+  }
+
+  assert.deepEqual(seenInactivityMs, [90_000, 180_000]);
 });
 
 test("/goal prompt helpers format elapsed time, continuation checklist, and response markers", () => {

@@ -1701,12 +1701,13 @@ export interface SubagentSteerInterceptCheck {
   agyAgentActive: boolean;
   isBoostActive: boolean;
   isTeamworkActive: boolean;
+  isSwarmActive?: boolean;
   subagentSpawnedThisTurn: boolean;
 }
 
 /**
  * Return trimmed text when an interactive Enter ("steer") submission during an
- * active Antigravity Boost/Teamwork/subagent turn should be routed to /btw
+ * active Antigravity Boost/Teamwork/Swarm/subagent turn should be routed to /btw
  * instead of stalling in Pi's steer queue until all subagents finish.
  */
 export function shouldInterceptSubagentSteerInput(
@@ -1721,7 +1722,12 @@ export function shouldInterceptSubagentSteerInput(
   if (check.provider !== "antigravity" || !check.agyAgentActive) {
     return undefined;
   }
-  if (!check.isBoostActive && !check.isTeamworkActive && !check.subagentSpawnedThisTurn) {
+  if (
+    !check.isBoostActive &&
+    !check.isTeamworkActive &&
+    !check.isSwarmActive &&
+    !check.subagentSpawnedThisTurn
+  ) {
     return undefined;
   }
   const trimmed = check.text.trim();
