@@ -1,4 +1,4 @@
-# pi-agy
+# pi-agy-provider
 
 Use **Google Antigravity** (`agy`) models inside the [pi coding agent](https://pi.dev). pi stays your UI — chat, model picker, tool cards, sessions — while the selected Antigravity model runs underneath through the `agy` CLI.
 
@@ -28,13 +28,15 @@ Use **Google Antigravity** (`agy`) models inside the [pi coding agent](https://p
 ## Installation
 
 ```bash
-pi install git:github.com/teededung/pi-agy
+pi install npm:pi-agy-provider
+# or directly from GitHub:
+pi install git:github.com/teededung/pi-agy-provider
 ```
 
 To update later on any machine:
 
 ```bash
-pi update git:github.com/teededung/pi-agy
+pi update npm:pi-agy-provider
 ```
 
 ## Highlights
@@ -356,4 +358,4 @@ flowchart TB
 
 ## Release notes
 
-Release notes and logs: [changelog](https://github.com/teededung/pi-agy/blob/main/CHANGELOG.md) · [GitHub releases](https://github.com/teededung/pi-agy/releases)
+Release notes and logs: [changelog](https://github.com/teededung/pi-agy-provider/blob/main/CHANGELOG.md) · [GitHub releases](https://github.com/teededung/pi-agy-provider/releases)

@@ -1,5 +1,5 @@
 {
-  "name": "pi-agy",
+  "name": "pi-agy-provider",
   "version": "1.1.0",
   "description": "Use Antigravity (agy) models inside the pi coding agent via the agy stream-json RPC, with pi as the UI.",
   "type": "module",
@@ -16,11 +16,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/teededung/pi-agy.git"
+    "url": "git+https://github.com/teededung/pi-agy-provider.git"
   },
-  "homepage": "https://github.com/teededung/pi-agy#readme",
+  "homepage": "https://github.com/teededung/pi-agy-provider#readme",
   "bugs": {
-    "url": "https://github.com/teededung/pi-agy/issues"
+    "url": "https://github.com/teededung/pi-agy-provider/issues"
   },
   "files": [
     "index.ts",
