@@ -3293,7 +3293,7 @@ test("agy 1.5.0 alignment: Retry-After backoff tracking, readOnlyPermissions arg
 
   const cid = "conv-retry-150";
   const logFile = path.join(logDir, "cli-20261105_140000.log");
-  let fakeNow = new Date("2026-11-05T14:00:10.000+07:00").getTime();
+  let fakeNow = new Date(2026, 10, 5, 14, 0, 10, 0).getTime();
   await writeFile(
     logFile,
     `I1105 14:00:09.000000 1 server.go:100] Sending user message to conversation ${cid}\n`,
@@ -3314,18 +3314,18 @@ test("agy 1.5.0 alignment: Retry-After backoff tracking, readOnlyPermissions arg
       `W1105 14:00:12.000000 1 http_helpers.go:410] Encountered retryable api error. retrying in 1m0s. Error (429): RESOURCE_EXHAUSTED\n`,
     "utf8",
   );
-  fakeNow = new Date("2026-11-05T14:00:12.500+07:00").getTime();
+  fakeNow = new Date(2026, 10, 5, 14, 0, 12, 500).getTime();
   assert.equal(tracker.sync(cid, () => {}), true);
   assert.equal(tracker.agentProgressed, true);
   assert.equal(tracker.isRetrying, true);
 
   // At +46s into the 60s Retry-After sleep (past 45s stallBaseMs), isRetrying stays true!
-  fakeNow = new Date("2026-11-05T14:00:58.500+07:00").getTime();
+  fakeNow = new Date(2026, 10, 5, 14, 0, 58, 500).getTime();
   assert.equal(tracker.sync(cid, () => {}), false);
   assert.equal(tracker.isRetrying, true);
 
   // Once delay + 15s grace expires with no new retry or step, isRetrying clears so real hangs still fail.
-  fakeNow = new Date("2026-11-05T14:01:30.000+07:00").getTime();
+  fakeNow = new Date(2026, 10, 5, 14, 1, 30, 0).getTime();
   tracker.sync(cid, () => {});
   assert.equal(tracker.isRetrying, false);
   tracker.close();
