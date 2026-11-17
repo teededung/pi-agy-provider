@@ -1080,7 +1080,7 @@ test("Group B1..B5: MCP HTTP bridge injection, loopback NO_PROXY, refusal/quota 
   );
   assert.equal(
     formatAcpStopError("refusal", undefined, "Quota exhausted", { resetTime: "10:00" }),
-    "Quota exhausted (resets 10:00)",
+    "Antigravity quota exceeded: Quota exhausted (resets 10:00)",
   );
   assert.ok(
     modelsFromAcpSessionState(
@@ -2407,8 +2407,8 @@ test("AgyThoughtTracker emits native-style retrying status and runtime scales st
   }
 });
 
-test("AgyThoughtTracker grants 330s upstream TTFB grace across post-tool steps and binds past >4 noisy cli logs", () => {
-  assert.equal(UPSTREAM_STREAM_WAIT_WINDOW_MS, 330_000);
+test("AgyThoughtTracker grants 630s upstream TTFB grace across post-tool steps and binds past >4 noisy cli logs", () => {
+  assert.equal(UPSTREAM_STREAM_WAIT_WINDOW_MS, 630_000);
   const tmpDir = mkdtempSync(path.join(tmpdir(), "agy-post-tool-grace-"));
   try {
     const cid = "ba665661-fbda-4b54-949a-f2f892ba0496";
@@ -2439,12 +2439,12 @@ test("AgyThoughtTracker grants 330s upstream TTFB grace across post-tool steps a
       now: () => nowMs,
     });
 
-    // Binds active cli-*.log despite 6 newer unrelated logs and keeps upstream grace past 180s up to 330s
+    // Binds active cli-*.log despite 6 newer unrelated logs and keeps upstream grace past 5m30s up to 10m30s (630s)
     tracker.sync(cid, () => {});
     assert.equal(tracker.isAwaitingUpstreamStream, true);
-    nowMs = new Date(2026, 10, 17, 10, 3, 20, 0).getTime(); // +200s (>180s large-context budget)
+    nowMs = new Date(2026, 10, 17, 10, 9, 40, 0).getTime(); // +580s (>5m30s old window, within agy 1.5.10 10m window)
     assert.equal(tracker.isAwaitingUpstreamStream, true);
-    nowMs = new Date(2026, 10, 17, 10, 5, 35, 0).getTime(); // +335s (>330s ceiling)
+    nowMs = new Date(2026, 10, 17, 10, 10, 35, 0).getTime(); // +635s (>630s ceiling)
     assert.equal(tracker.isAwaitingUpstreamStream, false);
 
     // Step 1: USER_INPUT (14), Step 2: PLANNER_RESPONSE (15, DONE) -> planner finished, not awaiting upstream
@@ -2460,7 +2460,7 @@ test("AgyThoughtTracker grants 330s upstream TTFB grace across post-tool steps a
       3,
       Buffer.from([0x08, 15]),
     );
-    nowMs = new Date(2026, 10, 17, 10, 6, 0, 0).getTime();
+    nowMs = new Date(2026, 10, 17, 10, 11, 0, 0).getTime();
     tracker.sync(cid, () => {});
     assert.equal(tracker.isAwaitingUpstreamStream, false);
 
@@ -2471,14 +2471,14 @@ test("AgyThoughtTracker grants 330s upstream TTFB grace across post-tool steps a
       2,
       Buffer.from("running tool"),
     );
-    nowMs = new Date(2026, 10, 17, 10, 6, 5, 0).getTime();
+    nowMs = new Date(2026, 10, 17, 10, 11, 5, 0).getTime();
     tracker.sync(cid, () => {});
     assert.equal(tracker.isAwaitingUpstreamStream, false);
 
     // Step 3 transitions to DONE (status = 3) with NO new `Sending user message` log line!
     // agy now sends post-tool streamGenerateContent and waits >126s for Google TTFB headers:
     db.prepare("UPDATE steps SET status = 3 WHERE idx = 3").run();
-    nowMs = new Date(2026, 10, 17, 10, 6, 10, 0).getTime();
+    nowMs = new Date(2026, 10, 17, 10, 11, 10, 0).getTime();
     tracker.sync(cid, () => {});
     assert.equal(tracker.isAwaitingUpstreamStream, true);
 
@@ -3353,15 +3353,27 @@ test("acpUsageToAgyUsage reconciles ACP 1.5.0 and legacy counters and quota erro
   assert.equal(multiNormalized.total_tokens, 25814);
   assert.equal(mapUsage(multiNormalized).totalTokens, 25814);
 
-  // Refusal with 429/rate-limit surfaces non-retryable quota prefix; policy refusal stays distinct
-  const rateRefusal = formatAcpStopError("refusal", "Error 429 RESOURCE_EXHAUSTED");
+  // Refusal with 429/rate-limit/spend-cap/prepaid/weekly quota surfaces non-retryable quota prefix; policy refusal stays distinct
+  const rateRefusal = formatAcpStopError("refusal", "Error 429 RESOURCE_EXHAUSTED", "");
   assert.match(rateRefusal, /^Antigravity quota exceeded:/);
   assert.equal(
     isRetryableAssistantError({ stopReason: "error", errorMessage: rateRefusal } as never),
     false,
   );
+  const spendCapFailure = acpEmptyTurnApiFailure("end_turn", "", "SPEND_CAP_REACHED: billing spend cap");
+  assert.match(spendCapFailure ?? "", /^Antigravity quota exceeded:/);
   assert.equal(
-    formatAcpStopError("refusal", "Content blocked by safety filter"),
+    isRetryableAssistantError({ stopReason: "error", errorMessage: spendCapFailure! } as never),
+    false,
+  );
+  const prepaidRefusal = formatAcpStopError("refusal", "Prepaid credits depleted (weekly limit)", "");
+  assert.match(prepaidRefusal, /^Antigravity quota exceeded:/);
+  assert.equal(
+    isRetryableAssistantError({ stopReason: "error", errorMessage: prepaidRefusal } as never),
+    false,
+  );
+  assert.equal(
+    formatAcpStopError("refusal", "Content blocked by safety filter", ""),
     "Content blocked by safety filter",
   );
 

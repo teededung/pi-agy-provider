@@ -1463,8 +1463,8 @@ test("deleteDisposableAgyConversation recursively deletes subagent trees and cle
   }
 });
 
-test("reduceAgyStream strips invisible U+FFF9-U+FFFB chars without truncating subsequent deltas and RECOMMENDED_AGY_VERSION is 1.5.9", () => {
-  assert.equal(RECOMMENDED_AGY_VERSION, "1.5.9");
+test("reduceAgyStream strips invisible U+FFF9-U+FFFB chars without truncating subsequent deltas and RECOMMENDED_AGY_VERSION is 1.5.10", () => {
+  assert.equal(RECOMMENDED_AGY_VERSION, "1.5.10");
   assert.equal(stripHallucinatedTurnSuffix("hello \uFFF9code\uFFFA\uFFFB world"), "hello code world");
 
   const stream = [
@@ -3326,6 +3326,24 @@ test("agy 1.5.0 alignment: Retry-After backoff tracking, readOnlyPermissions arg
 
   // Once delay + 15s grace expires with no new retry or step, isRetrying clears so real hangs still fail.
   fakeNow = new Date(2026, 10, 5, 14, 1, 30, 0).getTime();
+  tracker.sync(cid, () => {});
+  assert.equal(tracker.isRetrying, false);
+
+  // agy 1.5.10 retries Retry-After delays up to 4 minutes (e.g. 3m30s): stays retrying past 2 minutes!
+  await writeFile(
+    logFile,
+    `I1105 14:00:09.000000 1 server.go:100] Sending user message to conversation ${cid}\n` +
+      `W1105 14:00:12.000000 1 http_helpers.go:410] Encountered retryable api error. retrying in 1m0s. Error (429): RESOURCE_EXHAUSTED\n` +
+      `W1105 14:01:35.000000 1 http_helpers.go:410] Encountered retryable api error. retrying in 3m30s. Error (429): RESOURCE_EXHAUSTED\n`,
+    "utf8",
+  );
+  fakeNow = new Date(2026, 10, 5, 14, 1, 36, 0).getTime();
+  assert.equal(tracker.sync(cid, () => {}), true);
+  assert.equal(tracker.isRetrying, true);
+  fakeNow = new Date(2026, 10, 5, 14, 4, 40, 0).getTime(); // +185s into 210s sleep (> old 120s clamp)
+  tracker.sync(cid, () => {});
+  assert.equal(tracker.isRetrying, true);
+  fakeNow = new Date(2026, 10, 5, 14, 5, 25, 0).getTime(); // >210s + 15s grace
   tracker.sync(cid, () => {});
   assert.equal(tracker.isRetrying, false);
   tracker.close();

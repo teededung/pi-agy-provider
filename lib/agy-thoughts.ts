@@ -44,11 +44,17 @@ const MIN_COMPACTION_CONTEXT_TOKENS = 100_000;
 export const AGY_DEFAULT_MAX_RETRY_ATTEMPTS = 10;
 
 /**
- * Maximum silent TTFB / prefill window (`5m30s`) while awaiting upstream HTTP
- * headers or the first `PLANNER_RESPONSE` step — matches `agy`'s own `5m0s`
- * stream idle timeout plus a 30s buffer so internal `run.go` retries fire first.
+ * Maximum silent TTFB / prefill window (`10m30s`) while awaiting upstream HTTP
+ * headers or the first `PLANNER_RESPONSE` step — matches `agy 1.5.10`'s `10m0s`
+ * stream idle timeout plus a 30s buffer so internal retries fire first.
  */
-export const UPSTREAM_STREAM_WAIT_WINDOW_MS = 330_000;
+export const UPSTREAM_STREAM_WAIT_WINDOW_MS = 630_000;
+
+/**
+ * Maximum `Retry-After` backoff tolerated per attempt (`4m`, matching `agy 1.5.10`'s
+ * rate-limit wait window).
+ */
+export const MAX_RETRY_WAIT_WINDOW_MS = 240_000;
 
 export function resolveAgyRetryLabel(apiError?: string): string {
   if (!apiError) return "Model unavailable";
@@ -1085,7 +1091,7 @@ export class AgyThoughtTracker {
   /**
    * True when `cli-*.log` / `acp-server-*.log` or SQLite step state shows an
    * upstream request or post-step planner call still awaiting its first SQLite
-   * planner step (TTFB / high-effort prefill, up to `agy`'s `5m0s` stream timeout).
+   * planner step (TTFB / high-effort prefill, up to `agy 1.5.10`'s `10m0s` stream timeout).
    */
   get isAwaitingUpstreamStream(): boolean {
     const nowMs = this.#now();
@@ -1574,10 +1580,10 @@ export class AgyThoughtTracker {
         this.#activeStreamResponseId = undefined;
         this.#streamStartMaxIdx = -1;
         const parsedMs = parseGlogTimestampMs(line, nowMs);
-        if (isInitialReplay && parsedMs !== undefined && nowMs - parsedMs > 120_000) {
+        if (isInitialReplay && parsedMs !== undefined && nowMs - parsedMs > MAX_RETRY_WAIT_WINDOW_MS) {
           continue;
         }
-        const delayMs = Math.min(parseGoDurationMs(retryMatch[1]!) ?? 30_000, 120_000);
+        const delayMs = Math.min(parseGoDurationMs(retryMatch[1]!) ?? 30_000, MAX_RETRY_WAIT_WINDOW_MS);
         const sleepEndsAtMs = (parsedMs ?? nowMs) + delayMs;
         const attemptFailure = /\battempt (\d+) failed \((.+)\), retrying in/.exec(line);
         if (attemptFailure) {

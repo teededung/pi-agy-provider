@@ -642,6 +642,9 @@ export function extractAcpQuotaSnapshot(response: AcpPromptResponse): AcpQuotaSn
   };
 }
 
+const ACP_NON_RETRYABLE_QUOTA_RE =
+  /\bRESOURCE_EXHAUSTED\b|\bSPEND_CAP_REACHED\b|\b429\b|rate.?limit|spend.?cap|prepaid|weekly.?(?:quota|limit)|\bquota\b/i;
+
 /**
  * agy records an exhausted retry (e.g. `503 No capacity`) as an error step and then ends the
  * stream with a normal `end_turn` and no text. Treat that empty turn as the API failure it is.
@@ -652,7 +655,7 @@ export function acpEmptyTurnApiFailure(
   lastApiError: string | undefined,
 ): string | undefined {
   if (stopReason !== "end_turn" || responseText.trim() || !lastApiError) return undefined;
-  if (/\bRESOURCE_EXHAUSTED\b|\b429\b|\bquota\b/i.test(lastApiError)) {
+  if (ACP_NON_RETRYABLE_QUOTA_RE.test(lastApiError)) {
     return `Antigravity quota exceeded: request failed after agy gave up retrying (${lastApiError}).`;
   }
   return `Antigravity request failed after agy gave up retrying (${lastApiError}).`;
@@ -703,7 +706,7 @@ export function formatAcpStopError(
 
   const ensureNonRetryableRefusal = (msg: string): string =>
     stopReason === "refusal" &&
-    /\b429\b|rate.?limit|RESOURCE_EXHAUSTED/i.test(msg) &&
+    ACP_NON_RETRYABLE_QUOTA_RE.test(msg) &&
     !/quota exceeded/i.test(msg)
       ? `Antigravity quota exceeded: ${msg}`
       : msg;
