@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { appendFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -8,17 +9,20 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import type { ChildProcess } from "node:child_process";
 import type { Model, TranscriptContext } from "@earendil-works/pi-ai";
+import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 import { AgyAcpDriverSession } from "../lib/agy-acp-driver.ts";
 import {
   ACP_AUTH_REQUIRED_CODE,
   AcpTurnNormalizer,
   AgyAcpClient,
   AgyAcpRpcError,
+  AgyAcpTimeoutError,
   acpEmptyTurnApiFailure,
   acpUsageToAgyUsage,
   buildAcpAgyArgs,
   buildAcpChildEnvironment,
   decodeAcpSessionState,
+  detectAcpPlainTextQuotaExhaustion,
   extractAcpQuotaSnapshot,
   formatAcpStopError,
   modelsFromAcpSessionState,
@@ -35,7 +39,7 @@ import {
   formatAgyRetryStatus,
 } from "../lib/agy-thoughts.ts";
 import { AGY_COMPACTION_ENTRY, AGY_STALL_ENTRY, formatAgyStallSummary } from "../lib/agy-compaction.ts";
-import { AgyStallError } from "../lib/agy-client.ts";
+import { AgyStallError, redactAgySecrets } from "../lib/agy-client.ts";
 import { newTurnOutcome, type AgyActivity } from "../lib/reducer.ts";
 import { AgyPiBridge } from "../lib/bridge.ts";
 import { createAgyTurnExecutor } from "../lib/agy-driver.ts";
@@ -61,6 +65,7 @@ import {
   extractReferencedPromptImages,
   formatIsolatedToolLine,
   isBridgedMcpStep,
+  mapUsage,
   streamAntigravity,
 } from "../src/provider.ts";
 import {
@@ -2843,7 +2848,7 @@ test("extractReferencedPromptImages extracts valid local image paths and auto-at
 
     const promptCalls = fake.rpcLog.filter((c) => c.method === "session/prompt");
     assert.equal(promptCalls.length, 1);
-    assert.deepEqual(promptCalls[0]!.params.prompt, [
+    assert.deepEqual(fake.rpcLog.filter((c) => c.method === "session/prompt")[0]!.params.prompt, [
       { type: "image", data: tinyPngBase64, mimeType: "image/png" },
       { type: "text", text: textOnlyPrompt },
     ]);
@@ -2853,4 +2858,566 @@ test("extractReferencedPromptImages extracts valid local image paths and auto-at
     await runAntigravity(runtime, service.close);
     rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("AgyPiBridge closes keep-alive sockets promptly and streams increasing SSE progress keepalives", async () => {
+  const keepAliveBridge = new AgyPiBridge("pi-bridge-keepalive");
+  await keepAliveBridge.start();
+  const parsed = new URL(keepAliveBridge.url!);
+  const socket = net.createConnection({ host: parsed.hostname, port: Number(parsed.port) });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+    });
+    socket.write(
+      `POST ${parsed.pathname} HTTP/1.1\r\nHost: ${parsed.host}\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\n{}`,
+    );
+    await new Promise<void>((resolve) => socket.once("data", () => resolve()));
+
+    const t0 = Date.now();
+    await Promise.race([
+      keepAliveBridge.close(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("bridge.close() hung on keep-alive socket")), 1_000),
+      ),
+    ]);
+    assert.ok(Date.now() - t0 < 1_000);
+  } finally {
+    socket.destroy();
+    await keepAliveBridge.close();
+  }
+
+  const sseBridge = new AgyPiBridge("pi-bridge-sse", { progressKeepaliveMs: 25 });
+  sseBridge.setToolSource(() => [
+    { name: "slow_tool", description: "Slow tool", parameters: { type: "object" } },
+  ]);
+  sseBridge.refreshTools();
+  sseBridge.setOnCall(() => true);
+  await sseBridge.start();
+
+  try {
+    const respPromise = fetch(sseBridge.url!, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/call",
+        params: {
+          name: "pi__slow_tool",
+          arguments: { value: "work" },
+          _meta: { progressToken: "tok-1" },
+        },
+      }),
+    });
+
+    const resp = await respPromise;
+    assert.equal(resp.status, 200);
+    assert.match(resp.headers.get("content-type") ?? "", /text\/event-stream/);
+    const reader = resp.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const progressFrames: Array<{ progress: number; message?: string }> = [];
+    let resolvedCall = false;
+    let rpcResultText: string | undefined;
+
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split("\n\n");
+      buffer = blocks.pop() ?? "";
+      for (const block of blocks) {
+        const dataLine = block
+          .split("\n")
+          .find((l) => l.startsWith("data:"))
+          ?.slice(5)
+          .trim();
+        if (!dataLine) continue;
+        const msg = JSON.parse(dataLine) as {
+          id?: number;
+          method?: string;
+          params?: { progressToken?: string; progress?: number; message?: string };
+          result?: { content?: Array<{ text?: string }>; isError?: boolean };
+        };
+        if (msg.method === "notifications/progress") {
+          assert.equal(msg.params?.progressToken, "tok-1");
+          progressFrames.push({
+            progress: msg.params!.progress!,
+            message: msg.params?.message,
+          });
+          if (progressFrames.length >= 3 && !resolvedCall) {
+            resolvedCall = true;
+            assert.equal(
+              sseBridge.resolveCall("pi-bridge-1", { content: "done-ok", isError: false }),
+              true,
+            );
+          }
+        } else if (msg.id === 7) {
+          rpcResultText = msg.result?.content?.[0]?.text;
+        }
+      }
+    }
+
+    assert.ok(progressFrames.length >= 3);
+    for (let i = 1; i < progressFrames.length; i += 1) {
+      assert.ok(progressFrames[i]!.progress > progressFrames[i - 1]!.progress);
+    }
+    assert.equal(rpcResultText, "done-ok");
+  } finally {
+    await sseBridge.close();
+  }
+});
+
+test("streamAntigravity recovers late Pi bridge tool results after early ACP prompt end", async () => {
+  const prevPaceEnv = process.env.PI_ANTIGRAVITY_THINKING_PACE;
+  process.env.PI_ANTIGRAVITY_THINKING_PACE = "0";
+
+  const bridge = new AgyPiBridge("pi-bridge-late");
+  bridge.setToolSource(() => [
+    { name: "echo", description: "Echo", parameters: { type: "object" } },
+  ]);
+  bridge.refreshTools();
+  await bridge.start();
+
+  const seenRequests: Array<{ conversationId?: string; prompt: string }> = [];
+  let lateHttpResponse: Promise<{ isError?: boolean; contentText?: string }> | undefined;
+  let runCalls = 0;
+
+  const runtime = createAntigravityRuntime(async (request) => {
+    runCalls += 1;
+    seenRequests.push({ conversationId: request.conversationId, prompt: request.prompt });
+    request.onConversation?.("conv-late-recovery");
+
+    if (runCalls === 1) {
+      // Simulate agy invoking pi__echo over the bridge, then finishing early before Pi returns toolResult.
+      lateHttpResponse = fetch(bridge.url!, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "pi__echo", arguments: { text: "run-late" } },
+        }),
+      })
+        .then((r) => r.json() as Promise<{ result?: { isError?: boolean; content?: Array<{ text?: string }> } }>)
+        .then((j) => ({
+          isError: j.result?.isError,
+          contentText: j.result?.content?.[0]?.text,
+        }));
+
+      await new Promise((r) => setTimeout(r, 35));
+      const earlyResult = {
+        type: "result" as const,
+        status: "OK" as const,
+        response: "MCP timed out",
+      };
+      request.onActivity?.({ type: "text", delta: "MCP timed out", stepId: 1 });
+      request.onActivity?.(earlyResult);
+      return {
+        status: "OK",
+        finished: true,
+        response: "MCP timed out",
+        conversationId: "conv-late-recovery",
+        usage: { input_tokens: 100, output_tokens: 5, total_tokens: 105 },
+        activities: [earlyResult],
+      };
+    }
+
+    const doneResult = {
+      type: "result" as const,
+      status: "OK" as const,
+      response: "Recovered from late output",
+    };
+    request.onActivity?.({ type: "text", delta: "Recovered from late output", stepId: 2 });
+    request.onActivity?.(doneResult);
+    return {
+      status: "OK",
+      finished: true,
+      response: "Recovered from late output",
+      conversationId: "conv-late-recovery",
+      usage: { input_tokens: 120, output_tokens: 8, total_tokens: 128 },
+      activities: [doneResult],
+    };
+  });
+  const service = runtime.runSync(AntigravityRuntime);
+  bridge.setOnCall((call) => service.pushBridgeCall(call));
+
+  try {
+    const model = {
+      id: "gemini-4-argon",
+      name: "Gemini 4 Argon",
+      api: "antigravity-stream-json",
+      provider: "antigravity",
+      baseUrl: "agy://local-stream-json",
+      reasoning: true,
+      input: ["text", "image"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 1_000_000,
+      maxTokens: 64_000,
+    } as unknown as Model<string>;
+
+    const streamFn = streamAntigravity(runtime, service, new AgyReplayStore(), bridge);
+    const turn1Ctx = {
+      messages: [{ role: "user", content: "Run echo", timestamp: 1 }],
+    } as unknown as TranscriptContext;
+
+    const first = await streamFn(model, turn1Ctx).result();
+    assert.equal(first.stopReason, "toolUse");
+    const toolCall = first.content.find((b) => b.type === "toolCall");
+    assert.ok(toolCall && toolCall.type === "toolCall");
+
+    // Wait for early executor completion and verify pending bridge call was cancelled cleanly
+    const httpOutcome = await lateHttpResponse!;
+    assert.equal(httpOutcome.isError, true);
+    assert.match(httpOutcome.contentText ?? "", /before Pi returned the tool result/);
+    assert.equal(bridge.pendingCount, 0);
+
+    const turn2Ctx = {
+      messages: [
+        ...turn1Ctx.messages,
+        first,
+        {
+          role: "toolResult",
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content: [{ type: "text", text: "LATE_TOOL_OUTPUT_42" }],
+          isError: false,
+          timestamp: 2,
+        },
+      ],
+    } as unknown as TranscriptContext;
+
+    const second = await streamFn(model, turn2Ctx).result();
+    assert.equal(second.stopReason, "stop");
+    const text = second.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+    assert.equal(text, "Recovered from late output");
+    assert.equal(runCalls, 2);
+    assert.equal(seenRequests[1]?.conversationId, "conv-late-recovery");
+    assert.match(seenRequests[1]?.prompt ?? "", /<late_tool_results>/);
+    assert.match(seenRequests[1]?.prompt ?? "", /LATE_TOOL_OUTPUT_42/);
+  } finally {
+    if (prevPaceEnv === undefined) delete process.env.PI_ANTIGRAVITY_THINKING_PACE;
+    else process.env.PI_ANTIGRAVITY_THINKING_PACE = prevPaceEnv;
+    await runAntigravity(runtime, service.close);
+    await bridge.close();
+  }
+});
+
+test("redactAgySecrets scrubs credentials and AgyAcpClient/DriverSession evict timed-out or closed connections", async () => {
+  const scrubbed = redactAgySecrets(
+    "oauth=ya29.secret-abc key=AIza1234567890abcdefghijkl access_token=tok123 Bearer mysecretbearertoken",
+  );
+  assert.doesNotMatch(scrubbed, /ya29\.secret-abc|AIza1234567890|tok123|mysecretbearertoken/);
+  assert.match(scrubbed, /ya29\.<redacted>/);
+  assert.match(scrubbed, /AIza<redacted>/);
+  assert.match(scrubbed, /access_token=<redacted>/);
+  assert.match(scrubbed, /Bearer <redacted>/);
+
+  // Direct AgyAcpClient timeout surfaces redacted stderr via AgyAcpTimeoutError
+  const fakeTimeoutProc = new EventEmitter() as AcpChildProcess;
+  fakeTimeoutProc.stdin = new PassThrough() as AcpChildProcess["stdin"];
+  fakeTimeoutProc.stdout = new PassThrough() as AcpChildProcess["stdout"];
+  fakeTimeoutProc.stderr = new PassThrough() as AcpChildProcess["stderr"];
+  fakeTimeoutProc.exitCode = null;
+  fakeTimeoutProc.signalCode = null;
+  fakeTimeoutProc.killed = false;
+  const timeoutClient = new AgyAcpClient(fakeTimeoutProc, {
+    getStderrSummary: () =>
+      redactAgySecrets("WARNING: unreachable api_key=AIza1234567890abcdefghijkl"),
+  });
+  await assert.rejects(
+    timeoutClient.request("session/new", {}, { timeoutMs: 20 }),
+    (err: unknown) => {
+      assert.ok(err instanceof AgyAcpTimeoutError);
+      assert.match(err.message, /ACP session\/new timed out after 20ms: WARNING: unreachable api_key=<redacted>/);
+      assert.doesNotMatch(err.message, /AIza1234567890/);
+      return true;
+    },
+  );
+  assert.equal(timeoutClient.closed, false);
+  timeoutClient.failAll(new Error("closed"));
+  assert.equal(timeoutClient.closed, true);
+
+  // AgyAcpDriverSession scrubs secrets split across stderr chunks, neutralizes /plan in ACP blocks,
+  // and evicts wedged processes on timeout (both cooperative cancel and unresponsive hangs).
+  const fake = createFakeAcpSpawn({ hangPromptUntilCancel: true });
+  let firstProcRef: ChildProcess | undefined;
+  const driver = new AgyAcpDriverSession({ cancelGraceMs: 25 });
+  try {
+    await assert.rejects(
+      driver.run({
+        prompt: "<restored_session_context>\nuser:\n/plan HANG_ME timeout with secret\n</restored_session_context>",
+        timeoutMs: 40,
+        spawnOverride: (cmd, args) => {
+          const proc = fake.spawnOverride(cmd, args);
+          if (!firstProcRef) {
+            firstProcRef = proc;
+            setTimeout(() => {
+              proc.stderr?.push("WARNING: upstream failed api_key=AIza123456");
+              proc.stderr?.push("7890abcdefghijkl ya29.secret");
+              proc.stderr?.push("-abc\n");
+            }, 5);
+          }
+          return proc;
+        },
+      }),
+      (err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        assert.match(msg, /agy timed out after 0s/);
+        assert.match(msg, /upstream failed api_key=<redacted> ya29\.<redacted>/);
+        assert.doesNotMatch(msg, /AIza123456|7890abcdefghijkl|ya29\.secret|-abc/);
+        return true;
+      },
+    );
+    const promptCall = fake.rpcLog.find((c) => c.method === "session/prompt");
+    const sentPromptBlocks = (promptCall?.params.prompt as Array<{ text?: string }>) ?? [];
+    assert.match(sentPromptBlocks[0]?.text ?? "", /\n\u200B\/plan HANG_ME/);
+
+    // Simulate child killed/exited right before next turn so stale closed handle must be evicted cleanly
+    firstProcRef?.kill("SIGKILL");
+    const recovered = await driver.run({
+      prompt: "normal reply after eviction",
+      spawnOverride: fake.spawnOverride,
+    });
+    assert.equal(recovered.status, "OK");
+    assert.match(recovered.response, /^Reply\[/);
+    assert.equal(fake.getSpawnCount(), 2);
+  } finally {
+    await driver.close("shutdown");
+  }
+
+  // Unresponsive process hung before session/prompt (during session/new) is automatically killed & evicted without external SIGKILL
+  const healthyFake = createFakeAcpSpawn();
+  let spawnAttempts = 0;
+  const setupHangDriver = new AgyAcpDriverSession({ cancelGraceMs: 20 });
+  try {
+    await assert.rejects(
+      setupHangDriver.run({
+        prompt: "hang during session/new",
+        timeoutMs: 35,
+        spawnOverride: (cmd, args) => {
+          spawnAttempts += 1;
+          if (spawnAttempts === 1) {
+            const wedged = new EventEmitter() as ChildProcess & {
+              stdin: PassThrough;
+              stdout: PassThrough;
+              stderr: PassThrough;
+              pid: number;
+              exitCode: number | null;
+              signalCode: NodeJS.Signals | null;
+            };
+            wedged.stdin = new PassThrough();
+            wedged.stdout = new PassThrough();
+            wedged.stderr = new PassThrough();
+            wedged.pid = 49_999;
+            wedged.exitCode = null;
+            wedged.signalCode = null;
+            wedged.kill = (sig) => {
+              wedged.signalCode = typeof sig === "string" ? sig : "SIGTERM";
+              queueMicrotask(() => wedged.emit("close", null, wedged.signalCode));
+              return true;
+            };
+            wedged.stdin.setEncoding("utf8");
+            wedged.stdin.on("data", (chunk: string) => {
+              for (const line of chunk.split("\n")) {
+                if (!line.trim()) continue;
+                const rpc = JSON.parse(line) as { id?: number; method?: string };
+                if (rpc.method === "initialize" && rpc.id !== undefined) {
+                  wedged.stdout.write(
+                    `${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { protocolVersion: 1, agentCapabilities: {} } })}\n`,
+                  );
+                }
+                // Intentionally never reply to session/new!
+              }
+            });
+            return wedged;
+          }
+          return healthyFake.spawnOverride(cmd, args);
+        },
+      }),
+      /agy timed out after 0s/,
+    );
+    const nextTurn = await setupHangDriver.run({
+      prompt: "healthy after wedged setup eviction",
+      spawnOverride: (cmd, args) => {
+        spawnAttempts += 1;
+        return healthyFake.spawnOverride(cmd, args);
+      },
+    });
+    assert.equal(nextTurn.status, "OK");
+    assert.equal(spawnAttempts, 2);
+  } finally {
+    await setupHangDriver.close("shutdown");
+  }
+});
+
+test("acpUsageToAgyUsage reconciles ACP 1.5.0 and legacy counters and quota errors stay non-retryable", () => {
+  // ACP 1.5.0+ net input + inclusive thoughtTokens
+  assert.deepEqual(
+    acpUsageToAgyUsage({
+      stopReason: "end_turn",
+      usage: {
+        inputTokens: 2506,
+        outputTokens: 300,
+        cachedReadTokens: 16877,
+        thoughtTokens: 100,
+        totalTokens: 19683,
+      },
+    }),
+    {
+      input_tokens: 2506,
+      output_tokens: 300,
+      thinking_tokens: 100,
+      cache_read_tokens: 16877,
+      total_tokens: 19683,
+    },
+  );
+
+  // Legacy ACP: gross input includes cacheRead + cacheWrite, output excludes thoughts
+  const legacyUsage = acpUsageToAgyUsage({
+    stopReason: "end_turn",
+    usage: {
+      inputTokens: 20,
+      outputTokens: 5,
+      cachedReadTokens: 5,
+      cachedWriteTokens: 2,
+      thoughtTokens: 3,
+      totalTokens: 28,
+    },
+  });
+  assert.deepEqual(legacyUsage, {
+    input_tokens: 13,
+    output_tokens: 8,
+    thinking_tokens: 3,
+    cache_read_tokens: 5,
+    cache_write_tokens: 2,
+    total_tokens: 28,
+  });
+  const mappedLegacy = mapUsage(legacyUsage);
+  assert.equal(mappedLegacy.cacheWrite, 2);
+  assert.equal(mappedLegacy.totalTokens, 28);
+
+  // ACP 1.5.0 usage_update tracking: ignores setup used=0, preserves single-step net context,
+  // and uses final inference context on multi-step turns instead of cumulative sums.
+  const norm = new AcpTurnNormalizer(newTurnOutcome());
+  norm.consumeUpdate({ sessionId: "s1", update: { sessionUpdate: "usage_update", used: 0, size: 1_000_000 } });
+  assert.equal(norm.lastContextUsed(), undefined);
+  assert.equal(norm.usageInferenceCount(), 0);
+  norm.consumeUpdate({ sessionId: "s1", update: { sessionUpdate: "usage_update", used: 13860, size: 1_000_000 } });
+  norm.consumeUpdate({ sessionId: "s1", update: { sessionUpdate: "usage_update", used: 25814, size: 1_000_000 } });
+  assert.equal(norm.lastContextUsed(), 25814);
+  assert.equal(norm.usageInferenceCount(), 2);
+
+  // Live ACP 1.5.0 single-inference warm-cache capture: used === 26947 (must NOT subtract cacheRead)
+  const singleWarm = acpUsageToAgyUsage({
+    stopReason: "end_turn",
+    usage: {
+      inputTokens: 2307,
+      cachedReadTokens: 24542,
+      outputTokens: 98,
+      thoughtTokens: 69,
+      totalTokens: 26947,
+    },
+  })!;
+  assert.deepEqual(normalizeAcpTurnUsageForStepCount(singleWarm, 1, 26947, 1), {
+    input_tokens: 2307,
+    output_tokens: 98,
+    thinking_tokens: 69,
+    cache_read_tokens: 24542,
+    total_tokens: 26947,
+  });
+  // Legacy ACP 1.4.3 single-inference where used === reconciledTotal + cacheRead (28 + 5 = 33)
+  assert.equal(normalizeAcpTurnUsageForStepCount(legacyUsage!, 1, 33, 1).total_tokens, 28);
+
+  // Live ACP 1.5.0 2-step warm-cache capture: cumulative 39674 -> final inference context 25814
+  const multiWarm = acpUsageToAgyUsage({
+    stopReason: "end_turn",
+    usage: {
+      inputTokens: 17121,
+      cachedReadTokens: 22320,
+      outputTokens: 233,
+      thoughtTokens: 120,
+      totalTokens: 39674,
+    },
+  })!;
+  const multiNormalized = normalizeAcpTurnUsageForStepCount(multiWarm, 2, 25814, 2);
+  assert.equal(multiNormalized.total_tokens, 25814);
+  assert.equal(mapUsage(multiNormalized).totalTokens, 25814);
+
+  // Refusal with 429/rate-limit surfaces non-retryable quota prefix; policy refusal stays distinct
+  const rateRefusal = formatAcpStopError("refusal", "Error 429 RESOURCE_EXHAUSTED");
+  assert.match(rateRefusal, /^Antigravity quota exceeded:/);
+  assert.equal(
+    isRetryableAssistantError({ stopReason: "error", errorMessage: rateRefusal } as never),
+    false,
+  );
+  assert.equal(
+    formatAcpStopError("refusal", "Content blocked by safety filter"),
+    "Content blocked by safety filter",
+  );
+
+  // Never clamp net inputTokens < cachedReadTokens to zero when totalTokens is omitted
+  assert.deepEqual(
+    acpUsageToAgyUsage({
+      stopReason: "end_turn",
+      usage: {
+        inputTokens: 500,
+        cachedReadTokens: 1200,
+        outputTokens: 80,
+        thoughtTokens: 50,
+      },
+    }),
+    {
+      input_tokens: 500,
+      output_tokens: 80,
+      thinking_tokens: 50,
+      cache_read_tokens: 1200,
+      total_tokens: 1780,
+    },
+  );
+
+  // Quota errors (both 429 retry exhaustion and plain-text Usage Limit Reached) fail non-retryably for Pi
+  const quotaErr429 = acpEmptyTurnApiFailure(
+    "end_turn",
+    "",
+    "Error 429, Message: quota exceeded, Status: RESOURCE_EXHAUSTED",
+  );
+  assert.match(quotaErr429 ?? "", /^Antigravity quota exceeded:.*gave up retrying/);
+  assert.equal(
+    isRetryableAssistantError({ stopReason: "error", errorMessage: quotaErr429! } as never),
+    false,
+  );
+
+  const plainQuota = detectAcpPlainTextQuotaExhaustion(
+    "end_turn",
+    "Usage Limit Reached\n\nYou have reached your current quota for this period.",
+    { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+    { resetTime: "2026-11-17T18:00:00Z" },
+  );
+  assert.match(
+    plainQuota ?? "",
+    /^Antigravity quota exceeded: Usage Limit Reached.*resets 2026-11-17T18:00:00Z/,
+  );
+  assert.equal(
+    isRetryableAssistantError({ stopReason: "error", errorMessage: plainQuota! } as never),
+    false,
+  );
+  // Real zero-text reply or non-zero usage is NOT misclassified as quota exhaustion
+  assert.equal(
+    detectAcpPlainTextQuotaExhaustion(
+      "end_turn",
+      "You asked about Usage Limit Reached.",
+      { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
+    ),
+    undefined,
+  );
 });

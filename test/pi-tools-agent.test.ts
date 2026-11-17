@@ -73,11 +73,17 @@ import {
   getAgyConsultCompletions,
   mergeAgyModels,
   parseAgyModels,
+  pricingForModel,
   resolveAgyConsultSpec,
   resolveAgyModelEffort,
 } from "../lib/models.ts";
 import { splitAgyModelEffort } from "../lib/agy-client.ts";
-import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
+import {
+  getSupportedThinkingLevels,
+  type Api,
+  type Model,
+  type TranscriptContext,
+} from "@earendil-works/pi-ai";
 import {
   boundSummarizationPrompt,
   contextHasPriorBoostActivity,
@@ -106,6 +112,7 @@ import {
   GRILL_DEACTIVATED_PROMPT,
   inspectGoalResponseMarkers,
   inspectGrillResponseMarker,
+  neutralizeAgyInterceptedSlashCommands,
   piSystemInstructionsPrompt,
   stripPiToolInventory,
 } from "../lib/prompt.ts";
@@ -3444,6 +3451,99 @@ test("parseAgyModels collapses gemini-4-hydrogen-xhigh into one model with 4 thi
   }
   const completions = getAgyConsultCompletions("hydrogen", parsed);
   assert.ok(completions?.some((item) => item.label === "hydrogen4"));
+});
+
+test("neutralizeAgyInterceptedSlashCommands, cacheRetention=none isolation, and Gemini 4 pricing", async () => {
+  const ZWSP = "\u200B";
+  assert.equal(neutralizeAgyInterceptedSlashCommands("/logout"), `${ZWSP}/logout`);
+  assert.equal(neutralizeAgyInterceptedSlashCommands("/USAGE"), `${ZWSP}/USAGE`);
+  assert.equal(neutralizeAgyInterceptedSlashCommands("please\n/plan this"), `please\n${ZWSP}/plan this`);
+  assert.equal(neutralizeAgyInterceptedSlashCommands("/Users/me/a.ts"), "/Users/me/a.ts");
+  assert.equal(neutralizeAgyInterceptedSlashCommands("https://x.y/usage"), "https://x.y/usage");
+  assert.equal(neutralizeAgyInterceptedSlashCommands("run /plan-x"), "run /plan-x");
+
+  assert.deepEqual(pricingForModel("gemini-4-hydrogen"), {
+    input: 1.5,
+    output: 7.5,
+    cacheRead: 0.075,
+    cacheWrite: 0,
+  });
+  assert.deepEqual(pricingForModel("gemini-4-hydrogen-xhigh"), {
+    input: 1.5,
+    output: 7.5,
+    cacheRead: 0.075,
+    cacheWrite: 0,
+  });
+  assert.deepEqual(pricingForModel("gemini-4-argon"), {
+    input: 2,
+    output: 10,
+    cacheRead: 0.1,
+    cacheWrite: 0,
+  });
+  assert.deepEqual(pricingForModel("gemini-4-carbon"), {
+    input: 2,
+    output: 10,
+    cacheRead: 0.1,
+    cacheWrite: 0,
+  });
+
+  // One-off requests (cacheRetention: "none") isolate onto disposable runtimes and neutralize slash commands
+  const mainPrompts: string[] = [];
+  const isolatedPrompts: string[] = [];
+  const mainRuntime = createAntigravityRuntime(async (req) => {
+    mainPrompts.push(req.prompt);
+    req.onConversation?.("main-conv");
+    req.onActivity?.({ type: "result", status: "OK", response: "main ok" });
+    return { status: "OK", finished: true, response: "main ok", conversationId: "main-conv", activities: [] };
+  });
+  const mainService = mainRuntime.runSync(AntigravityRuntime);
+  const isolatedRuntime = createAntigravityRuntime(async (req) => {
+    isolatedPrompts.push(req.prompt);
+    req.onConversation?.("iso-conv");
+    req.onActivity?.({ type: "result", status: "OK", response: "iso ok" });
+    return { status: "OK", finished: true, response: "iso ok", conversationId: "iso-conv", activities: [] };
+  });
+
+  try {
+    const model = {
+      id: "gemini-4-hydrogen",
+      name: "Gemini 4 Hydrogen",
+      api: "antigravity-stream-json",
+      provider: "antigravity",
+      baseUrl: "agy://local-stream-json",
+      reasoning: true,
+      input: ["text"],
+      cost: pricingForModel("gemini-4-hydrogen"),
+      contextWindow: 1_000_000,
+      maxTokens: 64_000,
+    } as unknown as Model<string>;
+
+    const streamFn = streamAntigravity(
+      mainRuntime,
+      mainService,
+      new AgyReplayStore(),
+      new AgyPiBridge("unused"),
+      undefined,
+      undefined,
+      () => true,
+      undefined,
+      () => isolatedRuntime,
+    );
+
+    const res = await streamFn(
+      model,
+      { messages: [{ role: "user", content: "/usage explain", timestamp: 1 }] } as unknown as TranscriptContext,
+      { cacheRetention: "none" },
+    ).result();
+    assert.equal(res.stopReason, "stop");
+    assert.equal(mainPrompts.length, 0);
+    assert.equal(isolatedPrompts.length, 1);
+    assert.equal(isolatedPrompts[0], `${ZWSP}/usage explain`);
+    const mainSnap = await mainRuntime.runPromise(mainService.snapshot);
+    assert.equal(mainSnap.conversationId, undefined);
+  } finally {
+    await mainRuntime.dispose();
+  }
 });
 
 
