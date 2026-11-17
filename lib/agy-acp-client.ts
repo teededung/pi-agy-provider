@@ -182,6 +182,18 @@ export interface AcpPromptResponse {
   _meta?: Record<string, unknown>;
 }
 
+export class AgyAcpTimeoutError extends Error {
+  readonly method: string;
+  readonly timeoutMs: number;
+
+  constructor(method: string, timeoutMs: number, message: string) {
+    super(message);
+    this.name = "AgyAcpTimeoutError";
+    this.method = method;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 export class AgyAcpRpcError extends Error {
   readonly code: number;
   readonly data?: unknown;
@@ -439,10 +451,10 @@ export function selectAcpPermissionOutcome(
 /**
  * Convert an ACP `PromptResponse` usage payload into `AgyUsage`.
  *
- * Handles both uncached `usage.inputTokens` (`agy acp` 1.5.0 native format, where
- * `inputTokens + cachedReadTokens + outputTokens === totalTokens`) and inclusive
- * `inputTokens` / `_meta.quota.token_count.input_tokens` (where `inputTokens`
- * includes `cachedReadTokens` and `inputTokens + outputTokens === totalTokens`).
+ * Reconciles `agy acp` 1.5.0+ net accounting (`inputTokens` excludes cache
+ * counters and `outputTokens` includes `thoughtTokens`) and legacy formats
+ * (`inputTokens` includes `cachedReadTokens` / `cachedWriteTokens` and/or
+ * `outputTokens` excludes `thoughtTokens`) against `totalTokens` when present.
  */
 export function acpUsageToAgyUsage(response: AcpPromptResponse): AgyUsage | undefined {
   const standard = asRecord(response.usage);
@@ -451,18 +463,20 @@ export function acpUsageToAgyUsage(response: AcpPromptResponse): AgyUsage | unde
   const tokenCount = asRecord(quota?.token_count);
 
   const cacheRead = safeNonNegativeInt(standard?.cachedReadTokens);
+  const cacheWrite = safeNonNegativeInt(standard?.cachedWriteTokens);
   const standardInput = safeNonNegativeInt(standard?.inputTokens);
   const quotaInput = safeNonNegativeInt(tokenCount?.input_tokens);
   const rawInput = standardInput ?? quotaInput;
-  const output =
+  const rawOutput =
     safeNonNegativeInt(standard?.outputTokens) ?? safeNonNegativeInt(tokenCount?.output_tokens);
   const thinking = safeNonNegativeInt(standard?.thoughtTokens);
   const explicitTotal = safeNonNegativeInt(standard?.totalTokens);
 
   if (
     rawInput === undefined &&
-    output === undefined &&
+    rawOutput === undefined &&
     cacheRead === undefined &&
+    cacheWrite === undefined &&
     thinking === undefined &&
     explicitTotal === undefined
   ) {
@@ -470,43 +484,103 @@ export function acpUsageToAgyUsage(response: AcpPromptResponse): AgyUsage | unde
   }
 
   let uncachedInput = rawInput;
-  if (rawInput !== undefined && cacheRead !== undefined && cacheRead > 0) {
-    let includesCacheRead = false;
+  let resolvedOutput = rawOutput;
+  const cr = cacheRead ?? 0;
+  const cw = cacheWrite ?? 0;
+  const thoughts = thinking ?? 0;
+
+  if (rawInput !== undefined || rawOutput !== undefined) {
+    const inVal = rawInput ?? 0;
+    const outVal = rawOutput ?? 0;
+    const outputIncludesThoughts = thinking === undefined || outVal >= thinking;
+
     if (explicitTotal !== undefined) {
-      const diffIfInclusive =
-        rawInput >= cacheRead
-          ? Math.abs(rawInput + (output ?? 0) - explicitTotal)
-          : Number.POSITIVE_INFINITY;
-      const diffIfUncached = Math.abs(rawInput + cacheRead + (output ?? 0) - explicitTotal);
-      includesCacheRead = diffIfInclusive < diffIfUncached;
-    } else if (standardInput === undefined && rawInput >= cacheRead) {
-      includesCacheRead = true;
-    }
-    if (includesCacheRead) {
-      uncachedInput = Math.max(0, rawInput - cacheRead);
+      const candidates: Array<{ input: number; output: number }> = [];
+      // 1. ACP 1.5.0+: input excludes cache counters, output already includes thoughtTokens.
+      if (outputIncludesThoughts) {
+        candidates.push({ input: inVal, output: outVal });
+      }
+      // 2. Legacy ACP: input includes cache counters, output excludes thoughts.
+      if (inVal >= cr) {
+        if (cw > 0 && inVal >= cr + cw) {
+          candidates.push({ input: inVal - cr - cw, output: outVal + thoughts });
+        }
+        candidates.push({ input: inVal - cr, output: outVal + thoughts });
+      }
+      // 3. Gross input + inclusive output.
+      if (outputIncludesThoughts && inVal >= cr) {
+        if (cw > 0 && inVal >= cr + cw) {
+          candidates.push({ input: inVal - cr - cw, output: outVal });
+        }
+        candidates.push({ input: inVal - cr, output: outVal });
+      }
+      // 4. Net input + exclusive output.
+      if (thoughts > 0) {
+        candidates.push({ input: inVal, output: outVal + thoughts });
+      }
+      const matched = candidates.find((c) => c.input + c.output + cr + cw === explicitTotal);
+      if (matched) {
+        if (rawInput !== undefined) uncachedInput = matched.input;
+        if (rawOutput !== undefined) resolvedOutput = matched.output;
+      } else if (!outputIncludesThoughts && rawOutput !== undefined) {
+        resolvedOutput = outVal + thoughts;
+      }
+    } else {
+      if (standardInput === undefined && rawInput !== undefined && cr > 0 && rawInput >= cr) {
+        uncachedInput = Math.max(0, rawInput - cr);
+      }
+      if (!outputIncludesThoughts && rawOutput !== undefined) {
+        resolvedOutput = outVal + thoughts;
+      }
     }
   }
-  const computedTotal = (uncachedInput ?? 0) + (output ?? 0) + (cacheRead ?? 0);
+  const computedTotal = (uncachedInput ?? 0) + (resolvedOutput ?? 0) + cr + cw;
 
   return {
     ...(uncachedInput !== undefined ? { input_tokens: uncachedInput } : {}),
-    ...(output !== undefined ? { output_tokens: output } : {}),
+    ...(resolvedOutput !== undefined ? { output_tokens: resolvedOutput } : {}),
     ...(thinking !== undefined ? { thinking_tokens: thinking } : {}),
     ...(cacheRead !== undefined ? { cache_read_tokens: cacheRead } : {}),
+    ...(cacheWrite !== undefined && cacheWrite > 0 ? { cache_write_tokens: cacheWrite } : {}),
     total_tokens: Math.max(explicitTotal ?? 0, computedTotal),
   };
 }
 
 /**
  * Fallback normalization when SQLite per-step `generator_metadata` is unavailable:
- * `agy acp` sums `inputTokens` and `cachedReadTokens` across every internal LLM
- * sub-request in a multi-tool turn, whereas Pi treats one `AssistantMessage.usage`
- * as that message's context window size (`input + cacheRead`).
+ * - When `agy acp` emitted `usage_update` (`contextUsed > 0`), use the final
+ *   inference's reported context occupancy directly (applying legacy duplicate-cache
+ *   correction only when a single inference proves `contextUsed === total + cacheRead`,
+ *   never subtracting `cacheRead` from already-correct ACP 1.5.0 `used` counts).
+ * - Otherwise divide cumulative `inputTokens` / `cachedReadTokens` by `modelCalls`.
  */
 export function normalizeAcpTurnUsageForStepCount(
   usage: AgyUsage,
   modelCalls: number,
+  contextUsed?: number,
+  usageInferences?: number,
 ): AgyUsage {
+  if (contextUsed !== undefined && contextUsed > 0 && (usageInferences ?? 0) > 0) {
+    if (usageInferences === 1) {
+      const reconciledTotal = usage.total_tokens ?? 0;
+      const cr = usage.cache_read_tokens ?? 0;
+      const resolvedTotal =
+        cr > 0 && contextUsed === reconciledTotal + cr ? reconciledTotal : contextUsed;
+      return {
+        ...usage,
+        total_tokens: resolvedTotal,
+      };
+    }
+    const output = usage.output_tokens ?? 0;
+    const netContextInput = Math.max(0, contextUsed - output);
+    const { cache_write_tokens: _cw, ...rest } = usage;
+    return {
+      ...rest,
+      input_tokens: netContextInput,
+      cache_read_tokens: 0,
+      total_tokens: contextUsed,
+    };
+  }
   const divisor = Math.max(1, Math.floor(modelCalls));
   if (divisor <= 1) return usage;
   const input =
@@ -515,13 +589,18 @@ export function normalizeAcpTurnUsageForStepCount(
     usage.cache_read_tokens !== undefined
       ? Math.round(usage.cache_read_tokens / divisor)
       : undefined;
+  const cacheWrite =
+    usage.cache_write_tokens !== undefined
+      ? Math.round(usage.cache_write_tokens / divisor)
+      : undefined;
   const output = usage.output_tokens;
-  const total = (input ?? 0) + (cacheRead ?? 0) + (output ?? 0);
+  const total = (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0) + (output ?? 0);
   return {
     ...(input !== undefined ? { input_tokens: input } : {}),
     ...(output !== undefined ? { output_tokens: output } : {}),
     ...(usage.thinking_tokens !== undefined ? { thinking_tokens: usage.thinking_tokens } : {}),
     ...(cacheRead !== undefined ? { cache_read_tokens: cacheRead } : {}),
+    ...(cacheWrite !== undefined && cacheWrite > 0 ? { cache_write_tokens: cacheWrite } : {}),
     total_tokens: total,
   };
 }
@@ -573,7 +652,38 @@ export function acpEmptyTurnApiFailure(
   lastApiError: string | undefined,
 ): string | undefined {
   if (stopReason !== "end_turn" || responseText.trim() || !lastApiError) return undefined;
+  if (/\bRESOURCE_EXHAUSTED\b|\b429\b|\bquota\b/i.test(lastApiError)) {
+    return `Antigravity quota exceeded: request failed after agy gave up retrying (${lastApiError}).`;
+  }
   return `Antigravity request failed after agy gave up retrying (${lastApiError}).`;
+}
+
+/**
+ * `agy` sometimes emits account quota exhaustion as an ordinary `end_turn` reply
+ * (`Usage Limit Reached ...`) with zero billed tokens instead of `stopReason: "refusal"`.
+ * Prefix with `"Antigravity quota exceeded:"` so Pi fails fast without auto-retrying.
+ */
+export function detectAcpPlainTextQuotaExhaustion(
+  stopReason: string,
+  responseText: string,
+  usage: AgyUsage | undefined,
+  quota?: AcpQuotaSnapshot,
+): string | undefined {
+  if (stopReason !== "end_turn" || (usage?.total_tokens ?? 0) > 0) return undefined;
+  const trimmed = responseText.trim();
+  if (
+    !/^\s*Usage Limit Reached\b[\s\S]*\bYou have reached your current quota for this period\b/i.test(
+      trimmed,
+    )
+  ) {
+    return undefined;
+  }
+  const compact = trimmed.replace(/\s+/g, " ");
+  const withReset =
+    quota?.resetTime && !compact.includes(quota.resetTime)
+      ? `${compact} (resets ${quota.resetTime})`
+      : compact;
+  return `Antigravity quota exceeded: ${withReset}`;
 }
 
 /**
@@ -591,12 +701,19 @@ export function formatAcpStopError(
       ? `${msg} (resets ${quota.resetTime})`
       : msg;
 
+  const ensureNonRetryableRefusal = (msg: string): string =>
+    stopReason === "refusal" &&
+    /\b429\b|rate.?limit|RESOURCE_EXHAUSTED/i.test(msg) &&
+    !/quota exceeded/i.test(msg)
+      ? `Antigravity quota exceeded: ${msg}`
+      : msg;
+
   if (rawErr?.trim()) {
-    return appendReset(rawErr.trim());
+    return ensureNonRetryableRefusal(appendReset(rawErr.trim()));
   }
   const trimmedResponse = responseText.trim();
   if (stopReason === "refusal" && trimmedResponse) {
-    return appendReset(trimmedResponse.slice(0, 500));
+    return ensureNonRetryableRefusal(appendReset(trimmedResponse.slice(0, 500)));
   }
   if (stopReason === "refusal") {
     return appendReset("Antigravity refused the request or reached its usage quota limit.");
@@ -976,6 +1093,8 @@ export class AcpTurnNormalizer {
   #streamedTextSegments: string[] = [];
   #currentSegment = "";
   #lastStepWarning: string | undefined;
+  #lastContextUsed: number | undefined;
+  #usageInferenceCount = 0;
 
   constructor(outcome: AgyTurnOutcome) {
     this.#outcome = outcome;
@@ -1184,6 +1303,14 @@ export class AcpTurnNormalizer {
         }
         break;
       }
+      case "usage_update": {
+        const used = safeNonNegativeInt(update.used);
+        if (used !== undefined && used > 0) {
+          this.#lastContextUsed = used;
+          this.#usageInferenceCount += 1;
+        }
+        break;
+      }
       default:
         break;
     }
@@ -1213,6 +1340,16 @@ export class AcpTurnNormalizer {
   lastWarningText(): string | undefined {
     return this.#lastStepWarning;
   }
+
+  /** Latest positive `usage_update.used` context size reported during this turn, if any. */
+  lastContextUsed(): number | undefined {
+    return this.#lastContextUsed;
+  }
+
+  /** Count of positive `usage_update` inference reports observed during this turn. */
+  usageInferenceCount(): number {
+    return this.#usageInferenceCount;
+  }
 }
 
 interface PendingRpc {
@@ -1227,6 +1364,7 @@ export interface AgyAcpClientHandlers {
   onPermission?: (request: AcpPermissionRequest) => AcpPermissionResponse | Promise<AcpPermissionResponse>;
   onProtocolWarning?: (line: string) => void;
   onTransportError?: (error: Error) => void;
+  getStderrSummary?: () => string | undefined;
 }
 
 export class AgyAcpClient {
@@ -1259,6 +1397,19 @@ export class AgyAcpClient {
 
   get initializeResult(): AcpInitializeResponse | undefined {
     return this.#initResult;
+  }
+
+  get closed(): boolean {
+    return (
+      this.#closed ||
+      this.#child.exitCode !== null ||
+      this.#child.signalCode !== null ||
+      Boolean(this.#child.killed)
+    );
+  }
+
+  hasPendingRpc(): boolean {
+    return this.#pending.size > 0;
   }
 
   setHandlers(handlers: AgyAcpClientHandlers): void {
@@ -1327,6 +1478,9 @@ export class AgyAcpClient {
         }
         this.#initResult = res;
         return res;
+      }).catch((err) => {
+        this.#initPromise = undefined;
+        throw err;
       });
       void this.#initPromise.catch(() => undefined);
     }
@@ -1580,11 +1734,19 @@ export class AgyAcpClient {
       };
 
       if (options.timeoutMs && options.timeoutMs > 0) {
+        const timeoutMs = options.timeoutMs;
         pending.timer = setTimeout(() => {
           this.#pending.delete(id);
           cleanup();
-          reject(new Error(`ACP ${method} timed out after ${options.timeoutMs}ms`));
-        }, options.timeoutMs);
+          const detail = this.#handlers.getStderrSummary?.()?.trim();
+          reject(
+            new AgyAcpTimeoutError(
+              method,
+              timeoutMs,
+              `ACP ${method} timed out after ${timeoutMs}ms${detail ? `: ${detail}` : ""}`,
+            ),
+          );
+        }, timeoutMs);
         pending.timer.unref?.();
       }
 

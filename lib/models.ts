@@ -225,25 +225,32 @@ const ZERO_PRICING: ModelPricing = {
  * than inheriting an unrelated vendor's rate.
  */
 export function pricingForModel(modelId: string): ModelPricing {
-  if (/^gemini-3\.(?:8|7|6)-flash$/i.test(modelId)) {
+  const baseId = modelId.replace(EFFORT_SUFFIX, "");
+  if (/^gemini-4-hydrogen$/i.test(baseId)) {
+    return { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 };
+  }
+  if (/^gemini-4-(?:argon|carbon)$/i.test(baseId)) {
+    return { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 };
+  }
+  if (/^gemini-3\.(?:8|7|6)-flash$/i.test(baseId)) {
     return { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.75 };
   }
-  if (/^gemini-3\.5-flash$/i.test(modelId)) {
+  if (/^gemini-3\.5-flash$/i.test(baseId)) {
     return { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 1.5 };
   }
-  if (/^gemini-3\.1-pro/i.test(modelId)) {
+  if (/^gemini-3\.1-pro/i.test(baseId)) {
     return { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2 };
   }
-  if (/^claude-sonnet-5-5/i.test(modelId)) {
+  if (/^claude-sonnet-5-5/i.test(baseId)) {
     return { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 };
   }
-  if (/^claude-opus-5-5/i.test(modelId)) {
+  if (/^claude-opus-5-5/i.test(baseId)) {
     return { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 };
   }
-  if (/^claude-sonnet-4-6/i.test(modelId)) {
+  if (/^claude-sonnet-4-6/i.test(baseId)) {
     return { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
   }
-  if (/^claude-opus-4-6/i.test(modelId)) {
+  if (/^claude-opus-4-6/i.test(baseId)) {
     return { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
   }
   return { ...ZERO_PRICING };

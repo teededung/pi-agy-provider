@@ -15,10 +15,12 @@ import {
   AcpTurnNormalizer,
   AgyAcpClient,
   AgyAcpRpcError,
+  AgyAcpTimeoutError,
   acpUsageToAgyUsage,
   buildAcpAgyArgs,
   buildAcpChildEnvironment,
   acpEmptyTurnApiFailure,
+  detectAcpPlainTextQuotaExhaustion,
   extractAcpQuotaSnapshot,
   formatAcpStopError,
   modelsFromAcpSessionState,
@@ -45,6 +47,7 @@ import {
   canFallbackToLegacyEffortSuffix,
   extractAgyStderrSummary,
   isAgyModelEffortFallbackError,
+  redactAgySecrets,
   rememberLegacyEffortSuffixModel,
   type AgyTurnRequest,
 } from "./agy-client.ts";
@@ -73,6 +76,7 @@ import {
   type SlidingDeadline,
 } from "./reducer.ts";
 import { isAgySubagentTool } from "./subagents.ts";
+import { neutralizeAgyInterceptedSlashCommands } from "./prompt.ts";
 import {
   agyHasRunningToolProcess,
   agyProbeSubagents,
@@ -127,7 +131,8 @@ interface ActiveAcpTurn {
   lastSubagentUpdateMs?: number;
   subagentSpawned?: boolean;
   aborted: boolean;
-  stallError?: AgyStallError;
+  promptInFlight?: boolean;
+  stallError?: AgyStallError | AgySpawnError;
   cancelTimer?: NodeJS.Timeout;
   abortHandler?: () => void;
   settleError?: (err: unknown) => void;
@@ -166,6 +171,7 @@ export class AgyAcpDriverSession implements AgyTurnExecutor {
   #config: AgyProcessConfigSnapshot | undefined;
   #openSessions = new Map<string, OpenAcpSessionMeta>();
   #lastConversationId: string | undefined;
+  #rawStderrTail = "";
   #stderrTail = "";
   #active: ActiveAcpTurn | undefined;
   #queue: Promise<void> = Promise.resolve();
@@ -394,6 +400,18 @@ export class AgyAcpDriverSession implements AgyTurnExecutor {
       bridgeRevision: request.bridgeRevision,
     };
 
+    if (
+      this.#child &&
+      (!this.#client ||
+        this.#client.closed ||
+        this.#client.hasPendingRpc() ||
+        this.#child.exitCode !== null ||
+        this.#child.signalCode !== null)
+    ) {
+      this.#log("recycle:closed-connection");
+      await this.#killProcess("idle");
+    }
+
     const recycleCause = this.#processRecycleCause(desiredConfig);
     if (this.#child && recycleCause) {
       this.#log(`recycle:${recycleCause}`);
@@ -489,6 +507,7 @@ export class AgyAcpDriverSession implements AgyTurnExecutor {
           onQuota: (quota) => {
             this.#lastQuota = quota;
           },
+          getStderrTail: () => this.#stderrTail,
         },
       );
       this.#consecutiveStalls = 0;
@@ -553,6 +572,7 @@ export class AgyAcpDriverSession implements AgyTurnExecutor {
     this.#child = child;
     this.#config = config;
     this.#openSessions.clear();
+    this.#rawStderrTail = "";
     this.#stderrTail = "";
     this.#spawnCount += 1;
     this.#currentProcessTurns = 0;
@@ -582,16 +602,15 @@ export class AgyAcpDriverSession implements AgyTurnExecutor {
           turn?.settleError?.(transportErr);
         });
       },
+      getStderrSummary: () => extractAgyStderrSummary(this.#stderrTail),
     });
     this.#client = client;
 
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
       if (generation !== this.#generation) return;
-      this.#stderrTail += chunk;
-      if (this.#stderrTail.length > STDERR_LIMIT) {
-        this.#stderrTail = this.#stderrTail.slice(-STDERR_LIMIT);
-      }
+      this.#rawStderrTail = (this.#rawStderrTail + chunk).slice(-STDERR_LIMIT);
+      this.#stderrTail = redactAgySecrets(this.#rawStderrTail);
       if (this.#active && this.#active.generation === generation) {
         this.#rearmStallTimer(this.#active);
       }
@@ -746,10 +765,30 @@ export class AgyAcpDriverSession implements AgyTurnExecutor {
       () => {
         if (this.#active !== turn) return;
         const secs = Math.round(renewMs / 1000);
-        if (turn.sessionId && this.#client) {
-          this.#client.cancel(turn.sessionId);
+        const detail = extractAgyStderrSummary(this.#stderrTail);
+        const timeoutErr = new AgySpawnError(
+          `agy timed out after ${secs}s${detail ? `: ${detail}` : ""}`,
+          this.#stderrTail,
+        );
+        if (!turn.promptInFlight || !turn.sessionId || !this.#client) {
+          this.#recordRecycle("unspecified");
+          void this.#killProcess(this.#shutdown ? "dead" : "idle", timeoutErr).finally(() => {
+            turn.settleError?.(timeoutErr);
+          });
+          return;
         }
-        turn.settleError?.(new AgySpawnError(`agy timed out after ${secs}s`, this.#stderrTail));
+        turn.stallError = timeoutErr;
+        this.#client.cancel(turn.sessionId);
+        if (!turn.cancelTimer) {
+          turn.cancelTimer = setTimeout(() => {
+            if (this.#active !== turn) return;
+            this.#recordRecycle("unspecified");
+            void this.#killProcess(this.#shutdown ? "dead" : "idle", timeoutErr).finally(() => {
+              turn.settleError?.(timeoutErr);
+            });
+          }, this.#cancelGraceMs);
+          turn.cancelTimer.unref?.();
+        }
       },
       renewMs,
     );
@@ -1074,6 +1113,7 @@ async function awaitTurnExecution(
     onForceKillOnCancelTimeout: () => Promise<void>;
     onSessionState: (state: AcpSessionState) => void;
     onQuota: (quota: AcpQuotaSnapshot) => void;
+    getStderrTail: () => string;
   },
 ): Promise<AgyTurnOutcome> {
   const { request, outcome, normalizer, thoughtTracker } = turn;
@@ -1097,19 +1137,64 @@ async function awaitTurnExecution(
   const mcpServers = readAcpMcpServersFromDirectory(request.mcpDirectory);
   const mcpFingerprint = JSON.stringify(mcpServers);
 
-  await Promise.race([client.initialize(request.signal), interrupted]);
-
-  const useNativeSystemPrompt = client.supportsSystemPromptAppend();
-  const desiredSystemPrompt = useNativeSystemPrompt ? (request.systemPrompt ?? "") : "";
-
   let sessionId = request.conversationId;
-  if (sessionId) {
-    const existing = hooks.openSessions.get(sessionId);
-    if (!existing) {
-      const resumedState = await Promise.race([
-        client.resumeSession(
+  try {
+    await Promise.race([client.initialize(request.signal), interrupted]);
+
+    const useNativeSystemPromptSetup = client.supportsSystemPromptAppend();
+    const desiredSystemPrompt = useNativeSystemPromptSetup ? (request.systemPrompt ?? "") : "";
+
+    if (sessionId) {
+      const existing = hooks.openSessions.get(sessionId);
+      if (!existing) {
+        const resumedState = await Promise.race([
+          client.resumeSession(
+            {
+              sessionId,
+              cwd,
+              additionalDirectories,
+              mcpServers,
+              ...(desiredSystemPrompt ? { systemPromptAppend: desiredSystemPrompt } : {}),
+            },
+            request.signal,
+          ),
+          interrupted,
+        ]);
+        hooks.onSessionState(resumedState);
+        rememberOpenSession(hooks.openSessions, client, sessionId, {
+          systemPrompt: desiredSystemPrompt,
+          mcpFingerprint,
+        });
+      } else if (
+        existing.systemPrompt !== desiredSystemPrompt ||
+        existing.mcpFingerprint !== mcpFingerprint
+      ) {
+        // Refresh in-memory ACP session handle when system instructions or MCP servers
+        // changed while preserving `<sessionId>.db` on disk.
+        await Promise.race([client.closeSession(sessionId, request.signal), interrupted]);
+        const resumedState = await Promise.race([
+          client.resumeSession(
+            {
+              sessionId,
+              cwd,
+              additionalDirectories,
+              mcpServers,
+              ...(desiredSystemPrompt ? { systemPromptAppend: desiredSystemPrompt } : {}),
+            },
+            request.signal,
+          ),
+          interrupted,
+        ]);
+        hooks.onSessionState(resumedState);
+        rememberOpenSession(hooks.openSessions, client, sessionId, {
+          systemPrompt: desiredSystemPrompt,
+          mcpFingerprint,
+        });
+      }
+    } else {
+      const created = await Promise.race([
+        client.newSession(
           {
-            sessionId,
             cwd,
             additionalDirectories,
             mcpServers,
@@ -1119,78 +1204,50 @@ async function awaitTurnExecution(
         ),
         interrupted,
       ]);
-      hooks.onSessionState(resumedState);
-      rememberOpenSession(hooks.openSessions, client, sessionId, {
-        systemPrompt: desiredSystemPrompt,
-        mcpFingerprint,
-      });
-    } else if (
-      existing.systemPrompt !== desiredSystemPrompt ||
-      existing.mcpFingerprint !== mcpFingerprint
-    ) {
-      // Refresh in-memory ACP session handle when system instructions or MCP servers
-      // changed while preserving `<sessionId>.db` on disk.
-      await Promise.race([client.closeSession(sessionId, request.signal), interrupted]);
-      const resumedState = await Promise.race([
-        client.resumeSession(
-          {
-            sessionId,
-            cwd,
-            additionalDirectories,
-            mcpServers,
-            ...(desiredSystemPrompt ? { systemPromptAppend: desiredSystemPrompt } : {}),
-          },
-          request.signal,
-        ),
-        interrupted,
-      ]);
-      hooks.onSessionState(resumedState);
+      sessionId = created.sessionId;
+      hooks.onSessionState(created);
       rememberOpenSession(hooks.openSessions, client, sessionId, {
         systemPrompt: desiredSystemPrompt,
         mcpFingerprint,
       });
     }
-  } else {
-    const created = await Promise.race([
-      client.newSession(
-        {
-          cwd,
-          additionalDirectories,
-          mcpServers,
-          ...(desiredSystemPrompt ? { systemPromptAppend: desiredSystemPrompt } : {}),
-        },
-        request.signal,
-      ),
-      interrupted,
-    ]);
-    sessionId = created.sessionId;
-    hooks.onSessionState(created);
-    rememberOpenSession(hooks.openSessions, client, sessionId, {
-      systemPrompt: desiredSystemPrompt,
-      mcpFingerprint,
-    });
+
+    turn.sessionId = sessionId;
+    outcome.conversationId = sessionId;
+    thoughtTracker.setConversationId(sessionId);
+    hooks.onConversation(sessionId);
+    hooks.onQueueOrphanScan(sessionId);
+
+    try {
+      await Promise.race([
+        client.configureSession(
+          sessionId,
+          {
+            model: request.model,
+            effort: request.effort,
+            mode: request.mode,
+            readOnlyPermissions: request.readOnlyPermissions,
+          },
+          request.signal,
+        ),
+        interrupted,
+      ]);
+    } catch (configureErr) {
+      hooks.openSessions.delete(sessionId);
+      throw configureErr;
+    }
+    hooks.onSessionState(client.getSessionState(sessionId));
+  } catch (setupErr) {
+    if (setupErr instanceof AgyAcpTimeoutError || client.closed) {
+      await hooks.onForceKillOnCancelTimeout().catch(() => undefined);
+    }
+    if (setupErr instanceof AgyAcpTimeoutError) {
+      throw new AgySpawnError(setupErr.message, hooks.getStderrTail());
+    }
+    throw setupErr;
   }
 
-  turn.sessionId = sessionId;
-  outcome.conversationId = sessionId;
-  thoughtTracker.setConversationId(sessionId);
-  hooks.onConversation(sessionId);
-  hooks.onQueueOrphanScan(sessionId);
-
-  await Promise.race([
-    client.configureSession(
-      sessionId,
-      {
-        model: request.model,
-        effort: request.effort,
-        mode: request.mode,
-        readOnlyPermissions: request.readOnlyPermissions,
-      },
-      request.signal,
-    ),
-    interrupted,
-  ]);
-  hooks.onSessionState(client.getSessionState(sessionId));
+  const useNativeSystemPrompt = client.supportsSystemPromptAppend();
 
   const promptText =
     !useNativeSystemPrompt && request.systemPromptRelay
@@ -1206,7 +1263,7 @@ async function awaitTurnExecution(
     }
   }
   if (promptText || blocks.length === 0) {
-    blocks.push({ type: "text", text: promptText });
+    blocks.push({ type: "text", text: neutralizeAgyInterceptedSlashCommands(promptText) });
   }
 
   let resolveAbortedOutcome: ((abortedOutcome: AgyTurnOutcome) => void) | undefined;
@@ -1238,6 +1295,7 @@ async function awaitTurnExecution(
   }
 
   let promptResponse;
+  turn.promptInFlight = true;
   try {
     const winner = await Promise.race([
       client.prompt(sessionId, blocks).then((res) => ({ kind: "prompt" as const, res })),
@@ -1259,9 +1317,11 @@ async function awaitTurnExecution(
       throw turn.stallError;
     }
     if (err instanceof AgyAcpRpcError) {
-      throw new AgySpawnError(err.message, "");
+      throw new AgySpawnError(err.message, hooks.getStderrTail());
     }
     throw err;
+  } finally {
+    turn.promptInFlight = false;
   }
 
   if (turn.cancelTimer) {
@@ -1302,6 +1362,8 @@ async function awaitTurnExecution(
     const normalizedUsage = normalizeAcpTurnUsageForStepCount(
       turnUsage,
       normalizer.estimatedModelCallCount(),
+      normalizer.lastContextUsed(),
+      normalizer.usageInferenceCount(),
     );
     outcome.usage = normalizedUsage;
     const usageActivity: AgyActivity = { type: "usage", usage: normalizedUsage };
@@ -1317,7 +1379,14 @@ async function awaitTurnExecution(
     finalText,
     thoughtTracker.lastApiError,
   );
-  const isOk = stopReason === "end_turn" && !emptyTurnFailure;
+  const plainQuotaFailure = detectAcpPlainTextQuotaExhaustion(
+    stopReason,
+    finalText,
+    outcome.usage,
+    quota,
+  );
+  const turnFailure = emptyTurnFailure ?? plainQuotaFailure;
+  const isOk = stopReason === "end_turn" && !turnFailure;
   const finishedReason: AgyFinishedReason | undefined = isOk
     ? undefined
     : stopReason === "cancelled"
@@ -1334,10 +1403,10 @@ async function awaitTurnExecution(
   outcome.finished = true;
   outcome.status = isOk ? "OK" : "ERROR";
   outcome.finishedReason = finishedReason;
-  outcome.response = finalText;
+  outcome.response = plainQuotaFailure ? "" : finalText;
   outcome.error = isOk
     ? undefined
-    : (emptyTurnFailure ?? formatAcpStopError(stopReason, fallbackErr, finalText, quota));
+    : (turnFailure ?? formatAcpStopError(stopReason, fallbackErr, finalText, quota));
 
   const resultActivity: AgyActivity = {
     type: "result",

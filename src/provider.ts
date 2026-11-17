@@ -68,8 +68,11 @@ import {
   GOAL_INITIAL_PROMPT,
   GRILL_COMPLETE_MARKER,
   GRILL_DEACTIVATED_PROMPT,
+  lateBridgeToolResultsPrompt,
+  neutralizeAgyInterceptedSlashCommands,
   omittedImagesPrompt,
   restoredPiContextPrompt,
+  type LateBridgeToolResultEntry,
   SWARM_CONTINUATION_PROMPT,
   SWARM_DEACTIVATED_PROMPT,
   SWARM_ORCHESTRATOR_PROMPT,
@@ -534,6 +537,62 @@ export function latestUserPrompt(context: TranscriptContext): { prompt: string; 
   return { prompt: segments.join("\n"), images };
 }
 
+const MAX_LATE_TOOL_RESULT_CHARS = 30_000;
+
+function flattenToolResultContent(raw: unknown): string {
+  if (typeof raw === "string") {
+    return raw.length > MAX_LATE_TOOL_RESULT_CHARS
+      ? `${raw.slice(0, MAX_LATE_TOOL_RESULT_CHARS)}\n... [truncated]`
+      : raw;
+  }
+  if (!Array.isArray(raw)) return "";
+  const parts: string[] = [];
+  for (const part of raw as Array<Record<string, unknown>>) {
+    if (part?.type === "text" && typeof part.text === "string") {
+      parts.push(part.text);
+    } else if (part?.type === "image") {
+      parts.push("[image omitted]");
+    }
+  }
+  const joined = parts.join("\n");
+  return joined.length > MAX_LATE_TOOL_RESULT_CHARS
+    ? `${joined.slice(0, MAX_LATE_TOOL_RESULT_CHARS)}\n... [truncated]`
+    : joined;
+}
+
+/**
+ * When an ACP prompt ends before Pi finishes executing a bridged tool (e.g.
+ * `agy`'s internal MCP timeout), `bridge.resolveCall` cannot deliver the late
+ * `toolResult` to that finished turn. Collect the trailing `pi-bridge-*`
+ * `toolResult`s so the runtime can replay them into a continuation prompt.
+ */
+function extractTrailingBridgeToolResults(
+  messages: TranscriptContext["messages"],
+  afterIndex: number,
+): LateBridgeToolResultEntry[] {
+  const trailing: LateBridgeToolResultEntry[] = [];
+  for (let i = messages.length - 1; i > afterIndex; i -= 1) {
+    const msg = messages[i] as {
+      role?: string;
+      toolCallId?: string;
+      toolName?: string;
+      content?: unknown;
+      isError?: boolean;
+    };
+    if (msg?.role !== "toolResult") break;
+    if (typeof msg.toolCallId !== "string" || !msg.toolCallId.startsWith("pi-bridge-")) {
+      return [];
+    }
+    trailing.push({
+      toolCallId: msg.toolCallId,
+      toolName: typeof msg.toolName === "string" && msg.toolName ? msg.toolName : "tool",
+      content: flattenToolResultContent(msg.content),
+      isError: msg.isError === true,
+    });
+  }
+  return trailing.reverse();
+}
+
 // A fresh fallback conversation can safely receive roughly 60k characters of
 // transcript history while staying well below agy's stdin line / pipe buffer
 // limit (~160KB-177KB). Normal reloads resume the persisted native conversation;
@@ -861,7 +920,8 @@ export function mapUsage(u: AgyUsage | undefined): AssistantMessage["usage"] {
   const input = u?.input_tokens ?? 0;
   const output = u?.output_tokens ?? 0;
   const cacheRead = u?.cache_read_tokens ?? 0;
-  const componentTotal = input + output + cacheRead;
+  const cacheWrite = u?.cache_write_tokens ?? 0;
+  const componentTotal = input + output + cacheRead + cacheWrite;
   return {
     input,
     output,
@@ -869,7 +929,7 @@ export function mapUsage(u: AgyUsage | undefined): AssistantMessage["usage"] {
     // report thinking_tokens as the reasoning subset of output regardless.
     reasoning: u?.thinking_tokens,
     cacheRead,
-    cacheWrite: 0,
+    cacheWrite,
     totalTokens: Math.max(u?.total_tokens ?? 0, componentTotal),
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   };
@@ -1313,7 +1373,8 @@ export function streamAntigravity(
         const sideRequest = rawUserPrompt
           ? isSideConversationRequest(rawUserPrompt, systemPrompt)
           : false;
-        const isolatedRequest = summaryRequest || sideRequest;
+        const oneOffRequest = options?.cacheRetention === "none";
+        const isolatedRequest = summaryRequest || sideRequest || oneOffRequest;
         isDisposableTurn = isolatedRequest;
         let prompt = rawUserPrompt;
         let consultOverride: OneShotConsultOverride | undefined;
@@ -1459,6 +1520,9 @@ export function streamAntigravity(
             hadBoostInConversation = true;
           }
         }
+        if (!summaryRequest && prompt) {
+          prompt = neutralizeAgyInterceptedSlashCommands(prompt);
+        }
 
         if (isolatedRequest) {
           // Pi invokes compaction, branch summarization, and side conversations (/btw)
@@ -1479,15 +1543,25 @@ export function streamAntigravity(
         const turnCwd = turnSnapshot.cwd ?? process.cwd();
 
         let bridgeRevision: string | undefined;
+        let resolvedBridgeCount = 0;
         const processProfile: AgyProcessProfile = getProcessProfile(isolatedRequest);
         if (!isolatedRequest) {
           // Refresh and resolve before the driver fingerprint is evaluated.
           // Re-entry into a pending bridge turn returns the existing controller,
           // so a changed revision is deferred safely to the next user turn.
           bridge.refreshTools();
-          resolveBridgeResultsFromContext(bridge, context.messages);
+          resolvedBridgeCount = resolveBridgeResultsFromContext(bridge, context.messages);
           bridgeRevision = getBridgeRevision();
         }
+        const postBridgeSnapshot = !isolatedRequest
+          ? await turnRuntime.runPromise(turnService.snapshot)
+          : turnSnapshot;
+        const lateBridgeResults =
+          !isolatedRequest &&
+          resolvedBridgeCount === 0 &&
+          !postBridgeSnapshot.hasLiveTurn
+            ? extractTrailingBridgeToolResults(context.messages, userBatch.start)
+            : [];
         const canUseAskUserQuestion =
           !isolatedRequest &&
           bridge.hasTool("ask_user_question") &&
@@ -1569,7 +1643,12 @@ export function streamAntigravity(
                 ? MAX_ACP_SUMMARIZATION_PROMPT_CHARS
                 : MAX_AGY_SUMMARIZATION_PROMPT_CHARS,
             )
-          : turnPromptWithImages;
+          : lateBridgeResults.length > 0
+            ? lateBridgeToolResultsPrompt(
+                lateBridgeResults,
+                postBridgeSnapshot.conversationId ? undefined : turnPromptWithImages,
+              )
+            : turnPromptWithImages;
         const readOnlyPermissions =
           summaryRequest ||
           sideSummaryRequest ||
@@ -1625,6 +1704,13 @@ export function streamAntigravity(
             bridgeRevision,
             signal: options?.signal,
             contextTokens: latestContextTokens,
+            onTurnEnded: isolatedRequest
+              ? undefined
+              : () => {
+                  bridge.cancelPendingCalls(
+                    "Antigravity prompt ended before Pi returned the tool result.",
+                  );
+                },
             timeoutMs: isTeamwork || isSwarm
               ? 43_200_000
               : isBoost || isGoal || isGoalActive?.()
@@ -2415,6 +2501,7 @@ export function streamAntigravity(
               const recovered =
                 !earlyTermination &&
                 hasResponse &&
+                !/quota exceeded|Usage Limit Reached/i.test(activity.error ?? "") &&
                 !OVERFLOW_PATTERN.test(activity.error ?? "") &&
                 RECOVERED_INTERRUPTION_PATTERN.test(activity.error ?? "");
 

@@ -766,4 +766,48 @@ export function inspectGrillResponseMarker(text: string): boolean {
   return Boolean(text && text.includes(GRILL_COMPLETE_MARKER));
 }
 
+/**
+ * agy runs `/plan` when matched at start or after whitespace, and `/logout`
+ * or `/usage` on joined user text, instead of passing them to the model.
+ * Inserting U+200B before the `/` stops agy from intercepting them, and agy
+ * strips U+200B before the model sees the prompt. Paths and unrelated slash
+ * tokens like `/plan-x` or `/Users/...` are untouched.
+ */
+const AGY_INTERCEPTED_SLASH_COMMAND_RE =
+  /(^|[\s\x1c-\x1f\x85])\/(?=(?:plan|usage|logout)(?:[\s\x1c-\x1f\x85]|$))/giu;
+
+export function neutralizeAgyInterceptedSlashCommands(text: string): string {
+  return text.replace(AGY_INTERCEPTED_SLASH_COMMAND_RE, "$1\u200B/");
+}
+
+export interface LateBridgeToolResultEntry {
+  toolCallId: string;
+  toolName: string;
+  content: string;
+  isError: boolean;
+}
+
+export function lateBridgeToolResultsPrompt(
+  results: readonly LateBridgeToolResultEntry[],
+  fallbackUserPrompt?: string,
+): string {
+  const rendered = results
+    .map(
+      (r) =>
+        `<tool_result id="${r.toolCallId}" tool="${r.toolName}" status="${r.isError ? "error" : "ok"}">\n${r.content}\n</tool_result>`,
+    )
+    .join("\n\n");
+  const header = fallbackUserPrompt
+    ? "Continue the user request below using the completed Pi tool result(s) that finished after the previous Antigravity prompt ended. Do not repeat completed tool actions."
+    : "Continue the current user request already given in this session using the completed Pi tool result(s) below (which finished after the previous Antigravity prompt ended). Do not repeat completed tool actions.";
+  return [
+    header,
+    `<late_tool_results>\n${rendered}\n</late_tool_results>`,
+    fallbackUserPrompt ? `# Current user request\n\n${fallbackUserPrompt}` : undefined,
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join("\n\n");
+}
+
+
 

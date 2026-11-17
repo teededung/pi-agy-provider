@@ -190,6 +190,7 @@ const USAGE_KEYS = [
   "output_tokens",
   "thinking_tokens",
   "cache_read_tokens",
+  "cache_write_tokens",
   "total_tokens",
 ] as const;
 
