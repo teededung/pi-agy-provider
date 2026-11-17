@@ -468,6 +468,7 @@ export function createSlidingDeadline(
       timer = undefined;
       onExpire();
     }, Math.max(0, delayMs));
+    timer.unref?.();
   };
 
   schedule(initialMs);

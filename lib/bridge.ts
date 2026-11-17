@@ -28,6 +28,7 @@ export const BRIDGE_SERVER_NAME = "pi-bridge";
 export const BRIDGE_TOOL_PREFIX = "pi__";
 /** Per-call cap; must stay below agy's 600s turn timeout so agy can still report the failure. */
 export const BRIDGE_CALL_TIMEOUT_MS = 480_000;
+export const DEFAULT_BRIDGE_PROGRESS_KEEPALIVE_MS = 15_000;
 
 export interface BridgeToolDef {
   /** Real pi tool name (without the `pi__` prefix). */
@@ -108,6 +109,9 @@ interface JsonRpcRequest {
     protocolVersion?: string;
     name?: string;
     arguments?: JsonObject;
+    _meta?: {
+      progressToken?: string | number;
+    };
   };
 }
 
@@ -144,9 +148,17 @@ export class AgyPiBridge {
   #dynamic = new Map<string, DynamicTool>();
   #catalogDigest = createHash("sha256").update("[]").digest("hex");
   #catalogRevision = 0;
+  readonly #progressKeepaliveMs: number;
 
-  constructor(serverName: string = BRIDGE_SERVER_NAME) {
+  constructor(
+    serverName: string = BRIDGE_SERVER_NAME,
+    options?: { progressKeepaliveMs?: number },
+  ) {
     this.serverName = serverName;
+    this.#progressKeepaliveMs = Math.max(
+      10,
+      options?.progressKeepaliveMs ?? DEFAULT_BRIDGE_PROGRESS_KEEPALIVE_MS,
+    );
   }
 
   /** Require `token` in the x-pi-bridge-token header on every request. */
@@ -240,6 +252,7 @@ export class AgyPiBridge {
   start(): Promise<void> {
     if (this.#server) return Promise.resolve();
     const server = createServer((req, res) => this.#handleHttp(req, res));
+    server.maxConnections = 64;
     this.#server = server;
     return new Promise((resolve, reject) => {
       const onError = (error: Error) => {
@@ -257,23 +270,32 @@ export class AgyPiBridge {
     });
   }
 
-  /** Fail all pending calls and stop listening. */
+  /** Fail all pending calls and stop listening, closing keep-alive sockets immediately. */
   close(): Promise<void> {
     const server = this.#server;
     if (!server) return Promise.resolve();
     this.#server = undefined;
     this.#port = 0;
-    for (const pending of this.#pending.values()) {
-      clearTimeout(pending.timer);
-      pending.resolve({
-        content: "antigravity: pi session shut down while the tool call was pending.",
-        isError: true,
-      });
-    }
-    this.#pending.clear();
+    this.cancelPendingCalls("antigravity: pi session shut down while the tool call was pending.");
     return new Promise((resolve) => {
       server.close(() => resolve());
+      server.closeAllConnections?.();
     });
+  }
+
+  /** Cancel any in-flight Pi tool calls when the upstream Antigravity turn exits early. */
+  cancelPendingCalls(
+    reason = "antigravity: turn ended before pi returned the tool result.",
+  ): number {
+    if (this.#pending.size === 0) return 0;
+    let count = 0;
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timer);
+      pending.resolve({ content: reason, isError: true });
+      count += 1;
+    }
+    this.#pending.clear();
+    return count;
   }
 
   /** True when the provider is still waiting for pi to execute this call. */
@@ -319,6 +341,79 @@ export class AgyPiBridge {
         );
         return;
       }
+      const acceptHeader = Array.isArray(req.headers.accept)
+        ? req.headers.accept.join(",")
+        : (req.headers.accept ?? "");
+      const progressToken = rpc.params?._meta?.progressToken;
+      const useSseProgress =
+        rpc.method === "tools/call" &&
+        acceptHeader.includes("text/event-stream") &&
+        (typeof progressToken === "string" || typeof progressToken === "number");
+
+      if (useSseProgress) {
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+          "mcp-session-id": SESSION_ID,
+        });
+        let progress = 0;
+        let keepalive: NodeJS.Timeout | undefined;
+        const stopKeepalive = () => {
+          if (!keepalive) return;
+          clearInterval(keepalive);
+          keepalive = undefined;
+        };
+        const sendProgress = () => {
+          if (res.writableEnded || res.destroyed) {
+            stopKeepalive();
+            return;
+          }
+          const frame = {
+            jsonrpc: "2.0",
+            method: "notifications/progress",
+            params: {
+              progressToken,
+              progress: progress++,
+              message: "Waiting for Pi tool execution",
+            },
+          };
+          res.write(`event: message\ndata: ${JSON.stringify(frame)}\n\n`);
+        };
+        res.once("close", stopKeepalive);
+        sendProgress();
+        keepalive = setInterval(sendProgress, this.#progressKeepaliveMs);
+        keepalive.unref?.();
+
+        void this.#handleRpc(rpc)
+          .then(
+            (response) => {
+              stopKeepalive();
+              if (res.writableEnded || res.destroyed) return;
+              if (response) {
+                res.write(`event: message\ndata: ${JSON.stringify(response)}\n\n`);
+              }
+              res.end();
+            },
+            () => {
+              stopKeepalive();
+              if (res.writableEnded || res.destroyed) return;
+              const errFrame = {
+                jsonrpc: "2.0",
+                id: rpc.id ?? null,
+                error: { code: -32603, message: "Internal error" },
+              };
+              res.write(`event: message\ndata: ${JSON.stringify(errFrame)}\n\n`);
+              res.end();
+            },
+          )
+          .finally(() => {
+            res.off("close", stopKeepalive);
+            stopKeepalive();
+          });
+        return;
+      }
+
       void this.#handleRpc(rpc).then(
         (response) => {
           if (!response) {
@@ -436,18 +531,20 @@ export class AgyPiBridge {
       };
     }
     return new Promise<BridgeCallResult>((resolve) => {
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        resolve({
+          content: `antigravity: pi tool "${tool}" did not return within ${Math.round(BRIDGE_CALL_TIMEOUT_MS / 1000)}s.`,
+          isError: true,
+        });
+      }, BRIDGE_CALL_TIMEOUT_MS);
+      timer.unref?.();
       const pending: PendingCall = {
         id,
         tool,
         args,
         resolve,
-        timer: setTimeout(() => {
-          this.#pending.delete(id);
-          resolve({
-            content: `antigravity: pi tool "${tool}" did not return within ${Math.round(BRIDGE_CALL_TIMEOUT_MS / 1000)}s.`,
-            isError: true,
-          });
-        }, BRIDGE_CALL_TIMEOUT_MS),
+        timer,
       };
       this.#pending.set(id, pending);
     });

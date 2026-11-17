@@ -264,12 +264,25 @@ export const READ_ONLY_AGY_SETTINGS_JSON = JSON.stringify({
   permissions: { allow: [] },
 });
 
+/** Scrub OAuth access tokens, Google API keys, and bridge tokens from surfaced stderr text. */
+export function redactAgySecrets(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(/\bya29\.[A-Za-z0-9._-]+/g, "ya29.<redacted>")
+    .replace(/\bAIza[A-Za-z0-9_-]{16,}/g, "AIza<redacted>")
+    .replace(
+      /\b(access_token|refresh_token|api_key|apikey|x-pi-bridge-token)(\s*[:=]\s*)([^\s"',;&]+)/gi,
+      "$1$2<redacted>",
+    )
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi, "$1<redacted>");
+}
+
 /**
  * Extract a concise, structured failure reason from agy stderr when the process
  * exits early (e.g. exit code 3 with `AGY_ERROR: {...}` or `[agy] print timeout after ...`).
  */
 export function extractAgyStderrSummary(stderr: string): string {
-  const trimmed = stderr.trim();
+  const trimmed = redactAgySecrets(stderr).trim();
   if (!trimmed) return "";
   const lines = trimmed
     .split(/\r?\n/)

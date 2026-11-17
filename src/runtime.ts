@@ -117,6 +117,7 @@ function waitForRetryBackoff(ms: number, signal: AbortSignal): Promise<boolean> 
       signal.removeEventListener("abort", onAbort);
       resolve(true);
     }, ms);
+    timer.unref?.();
     signal.addEventListener("abort", onAbort, { once: true });
   });
 }
@@ -176,6 +177,7 @@ export interface AntigravityStateSnapshot {
   turns: number;
   conversationUsage: AgyUsage;
   executor: AgyExecutorSnapshot;
+  hasLiveTurn?: boolean;
 }
 
 export interface AntigravityRuntimeShape {
@@ -220,6 +222,8 @@ export interface AntigravityRuntimeShape {
     readonly timeoutMs?: number;
     /** Latest observed branch context footprint (`input + cacheRead`), used to scale prefill stall budget. */
     readonly contextTokens?: number;
+    /** Invoked once when the logical agy turn ends (complete, failed, or invalidated). */
+    readonly onTurnEnded?: () => void;
   }) => Effect.Effect<AgyTurnController, AntigravityRuntimeClosedError>;
   /** Clear the active controller once a provider turn reached a terminal state. */
   readonly finishTurn: Effect.Effect<void>;
@@ -302,6 +306,7 @@ const makeRuntime = (
     let turns = 0;
     let closed = false;
     let active: AgyTurnController | undefined;
+    let activeOnTurnEnded: (() => void) | undefined;
     // Final output may reach Pi before the executor finishes process cleanup.
     // New turns must wait for its state/usage commit, not reattach or abort it.
     let activeTurnCompletion: Promise<void> | undefined;
@@ -317,6 +322,9 @@ const makeRuntime = (
 
     const invalidateActiveTurn = () => {
       generation += 1;
+      const endHook = activeOnTurnEnded;
+      activeOnTurnEnded = undefined;
+      endHook?.();
       activeTurnAbort?.abort();
       activeTurnAbort = undefined;
       activeTurnCompletion = undefined;
@@ -437,6 +445,14 @@ const makeRuntime = (
               model = request.modelId;
               const controller = new AgyTurnController(request.prompt, conversationUsage);
               active = controller;
+              let turnEndedFired = false;
+              const fireTurnEnded = () => {
+                if (turnEndedFired) return;
+                turnEndedFired = true;
+                if (activeOnTurnEnded === fireTurnEnded) activeOnTurnEnded = undefined;
+                request.onTurnEnded?.();
+              };
+              activeOnTurnEnded = fireTurnEnded;
               // Compose pi's request signal with our own so close() can kill
               // the agy child even when pi's signal never fires.
               const turnAbort = new AbortController();
@@ -804,6 +820,7 @@ const makeRuntime = (
               // loser; a late rejection does not require a separate swallow catch.
               activeTurnCompletion = Promise.race([runTurnWithStallRetries(), cancelled])
                 .then((outcome: AgyTurnOutcome) => {
+                  fireTurnEnded();
                   if (turnGeneration !== generation) {
                     controller.close(
                       "this turn was replaced by a newer request or a driver recycle",
@@ -822,12 +839,14 @@ const makeRuntime = (
                   controller.close();
                 })
                 .catch((cause: unknown) => {
+                  fireTurnEnded();
                   // A superseded turn still reports its real failure: the
                   // provider reading this controller must never be left with a
                   // bare "ended without a result event".
                   controller.fail(cause instanceof Error ? cause : new Error(String(cause)));
                 })
                 .finally(() => {
+                  fireTurnEnded();
                   turnDeadline.clear();
                   turnAbort.signal.removeEventListener("abort", onTurnAbort);
                   if (requestAbortHandler) {
@@ -878,6 +897,7 @@ const makeRuntime = (
             turns,
             conversationUsage: { ...conversationUsage },
             executor: executor.snapshot(),
+            hasLiveTurn: Boolean(active && !active.isClosed()),
           })),
         ),
       ),
