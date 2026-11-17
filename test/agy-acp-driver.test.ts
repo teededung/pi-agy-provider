@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -29,6 +29,7 @@ import {
 } from "../lib/agy-acp-client.ts";
 import {
   AgyThoughtTracker,
+  UPSTREAM_STREAM_WAIT_WINDOW_MS,
   extractUsageFromStepPayload,
   formatAgyLiveRetryLine,
   formatAgyRetryStatus,
@@ -700,6 +701,7 @@ test("AntigravityRuntime with native ACP executor falls back to fresh session on
     assert.ok(sentText.includes("<restored_context>prior turn</restored_context>"));
     assert.ok(sentText.includes("Continue work"));
     assert.ok(!sentText.includes("## Current Pi instructions"));
+    assert.ok(!sentText.includes("<session_instructions>"));
   } finally {
     await runAntigravity(runtime, service.close);
   }
@@ -2395,6 +2397,101 @@ test("AgyThoughtTracker emits native-style retrying status and runtime scales st
     nowMs = new Date(2026, 10, 11, 10, 10, 30, 0).getTime();
     assert.equal(tracker.lastApiError, undefined);
     tracker.close();
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("AgyThoughtTracker grants 330s upstream TTFB grace across post-tool steps and binds past >4 noisy cli logs", () => {
+  assert.equal(UPSTREAM_STREAM_WAIT_WINDOW_MS, 330_000);
+  const tmpDir = mkdtempSync(path.join(tmpdir(), "agy-post-tool-grace-"));
+  try {
+    const cid = "ba665661-fbda-4b54-949a-f2f892ba0496";
+    const dbPath = path.join(tmpDir, `${cid}.db`);
+    const db = new DatabaseSync(dbPath);
+    db.exec(
+      "CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, step_payload BLOB)",
+    );
+
+    const activeLogPath = path.join(tmpDir, "cli-20261117_100000.log");
+    writeFileSync(
+      activeLogPath,
+      `I1117 10:00:00.000000 100 conversation_manager.go:933] Sending user message to conversation ${cid} (items=1, media=0)\n`,
+      "utf8",
+    );
+    // Create 6 newer background cli-*.log files (e.g. periodic doRefreshQuota noise in other sessions)
+    const baseSec = Math.floor(Date.now() / 1000);
+    utimesSync(activeLogPath, baseSec, baseSec);
+    for (let i = 1; i <= 6; i += 1) {
+      const noisePath = path.join(tmpDir, `cli-20261117_10000${i}.log`);
+      writeFileSync(noisePath, `I1117 10:00:0${i}.000000 ${100 + i} quota.go:42] doRefreshQuota\n`, "utf8");
+      utimesSync(noisePath, baseSec + i, baseSec + i);
+    }
+
+    let nowMs = new Date(2026, 10, 17, 10, 0, 1, 0).getTime();
+    const tracker = new AgyThoughtTracker(undefined, tmpDir, {
+      logDir: tmpDir,
+      now: () => nowMs,
+    });
+
+    // Binds active cli-*.log despite 6 newer unrelated logs and keeps upstream grace past 180s up to 330s
+    tracker.sync(cid, () => {});
+    assert.equal(tracker.isAwaitingUpstreamStream, true);
+    nowMs = new Date(2026, 10, 17, 10, 3, 20, 0).getTime(); // +200s (>180s large-context budget)
+    assert.equal(tracker.isAwaitingUpstreamStream, true);
+    nowMs = new Date(2026, 10, 17, 10, 5, 35, 0).getTime(); // +335s (>330s ceiling)
+    assert.equal(tracker.isAwaitingUpstreamStream, false);
+
+    // Step 1: USER_INPUT (14), Step 2: PLANNER_RESPONSE (15, DONE) -> planner finished, not awaiting upstream
+    db.prepare("INSERT INTO steps (idx, step_type, status, step_payload) VALUES (?, ?, ?, ?)").run(
+      1,
+      14,
+      3,
+      Buffer.from([0x08, 14]),
+    );
+    db.prepare("INSERT INTO steps (idx, step_type, status, step_payload) VALUES (?, ?, ?, ?)").run(
+      2,
+      15,
+      3,
+      Buffer.from([0x08, 15]),
+    );
+    nowMs = new Date(2026, 10, 17, 10, 6, 0, 0).getTime();
+    tracker.sync(cid, () => {});
+    assert.equal(tracker.isAwaitingUpstreamStream, false);
+
+    // Step 3: Tool step (e.g. edit_file = 50) while RUNNING (status = 2) -> tool running, not awaiting planner yet
+    db.prepare("INSERT INTO steps (idx, step_type, status, step_payload) VALUES (?, ?, ?, ?)").run(
+      3,
+      50,
+      2,
+      Buffer.from("running tool"),
+    );
+    nowMs = new Date(2026, 10, 17, 10, 6, 5, 0).getTime();
+    tracker.sync(cid, () => {});
+    assert.equal(tracker.isAwaitingUpstreamStream, false);
+
+    // Step 3 transitions to DONE (status = 3) with NO new `Sending user message` log line!
+    // agy now sends post-tool streamGenerateContent and waits >126s for Google TTFB headers:
+    db.prepare("UPDATE steps SET status = 3 WHERE idx = 3").run();
+    nowMs = new Date(2026, 10, 17, 10, 6, 10, 0).getTime();
+    tracker.sync(cid, () => {});
+    assert.equal(tracker.isAwaitingUpstreamStream, true);
+
+    nowMs += 130_000; // +130s silent post-tool prefill
+    assert.equal(tracker.isAwaitingUpstreamStream, true);
+
+    // If the stream goroutine exits without producing a planner step, upstream grace clears immediately:
+    appendFileSync(
+      activeLogPath,
+      `I1117 10:08:25.000000 100 conversation_manager.go:990] Stream goroutine exited for ${cid}\n`,
+      "utf8",
+    );
+    nowMs += 5_000;
+    tracker.sync(cid, () => {});
+    assert.equal(tracker.isAwaitingUpstreamStream, false);
+
+    tracker.close();
+    db.close();
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

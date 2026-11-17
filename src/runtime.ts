@@ -42,7 +42,12 @@ import {
   type AgyUsage,
 } from "../lib/reducer.ts";
 import { agyToolStepKey, trackActiveToolStep } from "../lib/tool-steps.ts";
-import { piSystemInstructionsPrompt, stallContinuationPrompt } from "../lib/prompt.ts";
+import {
+  PI_BRIDGE_ROUTING_NOTES,
+  piSystemInstructionsPrompt,
+  stallContinuationPrompt,
+  stripPiToolInventory,
+} from "../lib/prompt.ts";
 import { AgyTurnController } from "../lib/turn.ts";
 
 interface AntigravityRuntimeSettings {
@@ -454,7 +459,13 @@ const makeRuntime = (
                 !conversationId && restoreHistoryOnNextConversation
                   ? request.historyBootstrap
                   : undefined;
-              const systemPrompt = request.systemPrompt ?? "";
+              const strippedSystemPrompt = stripPiToolInventory(request.systemPrompt ?? "");
+              const systemPrompt =
+                Boolean(executor.supportsNativeSystemPrompt) &&
+                !request.agent?.startsWith("pi-tools") &&
+                /<rules>[\s\S]*?<\/rules>/.test(strippedSystemPrompt)
+                  ? `${PI_BRIDGE_ROUTING_NOTES}\n\n${strippedSystemPrompt}`
+                  : strippedSystemPrompt;
               const systemPromptRelay = (
                 !conversationId
                   ? Boolean(systemPrompt)

@@ -533,9 +533,14 @@ async function runSingleAgyTurn(request: AgyTurnRequest): Promise<AgyTurnOutcome
             return;
           }
           const likelyCompacting = thoughtTracker.isLikelyCompacting(activeTools.size > 0);
+          const awaitingUpstream =
+            activeTools.size === 0 && thoughtTracker.isAwaitingUpstreamStream;
           if (
-            (thoughtTracker.isGenerating || likelyCompacting || thoughtTracker.isRetrying) &&
-            stallGraces < 3
+            (thoughtTracker.isGenerating ||
+              likelyCompacting ||
+              thoughtTracker.isRetrying ||
+              awaitingUpstream) &&
+            stallGraces < 6
           ) {
             stallGraces += 1;
             armStall();

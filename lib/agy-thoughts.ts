@@ -43,6 +43,13 @@ const MIN_COMPACTION_CONTEXT_TOKENS = 100_000;
 /** Default total attempts in agy's internal model retry loop (`ModelRequestStatus.max_attempts = 10`). */
 export const AGY_DEFAULT_MAX_RETRY_ATTEMPTS = 10;
 
+/**
+ * Maximum silent TTFB / prefill window (`5m30s`) while awaiting upstream HTTP
+ * headers or the first `PLANNER_RESPONSE` step — matches `agy`'s own `5m0s`
+ * stream idle timeout plus a 30s buffer so internal `run.go` retries fire first.
+ */
+export const UPSTREAM_STREAM_WAIT_WINDOW_MS = 330_000;
+
 export function resolveAgyRetryLabel(apiError?: string): string {
   if (!apiError) return "Model unavailable";
   if (
@@ -683,6 +690,10 @@ export class AgyThoughtTracker {
   #lastCliLogScanAtMs = 0;
   #pendingMonitorCalls = 0;
   #awaitingUpstreamHeadersSinceMs: number | undefined;
+  #awaitingPlannerSinceMs: number | undefined;
+  #plannerWaitStepIdx = -1;
+  #exitedAtStepIdx = -1;
+  #sawStreamExit = false;
   #activeStreamStartedAtMs: number | undefined;
   #activeStreamResponseId: string | undefined;
   #streamStartMaxIdx = -1;
@@ -753,6 +764,10 @@ export class AgyThoughtTracker {
       this.#lastCliLogScanAtMs = 0;
       this.#pendingMonitorCalls = 0;
       this.#awaitingUpstreamHeadersSinceMs = undefined;
+      this.#awaitingPlannerSinceMs = undefined;
+      this.#plannerWaitStepIdx = -1;
+      this.#exitedAtStepIdx = -1;
+      this.#sawStreamExit = false;
       this.#activeStreamStartedAtMs = undefined;
       this.#activeStreamResponseId = undefined;
       this.#streamStartMaxIdx = -1;
@@ -979,13 +994,31 @@ export class AgyThoughtTracker {
       nowMs,
     );
     const isCompacting = sqlCheckpointActive || cliCompacting;
+    if (this.#sawStreamExit) {
+      this.#exitedAtStepIdx = overallMaxIdx;
+      this.#sawStreamExit = false;
+    }
     if (hasRunningStep || isGenerating) {
       this.#awaitingUpstreamHeadersSinceMs = undefined;
+      this.#awaitingPlannerSinceMs = undefined;
+      this.#plannerWaitStepIdx = -1;
       this.#retryUntilMs = 0;
       this.#retryStreak = 0;
       this.#activeRetryInfo = undefined;
       this.#lastApiError = undefined;
       this.#lastApiErrorRetryEndsAtMs = 0;
+    } else if (
+      awaitingPlannerAfterStep &&
+      overallMaxIdx >= this.#minStepIndex &&
+      overallMaxIdx > this.#exitedAtStepIdx
+    ) {
+      if (this.#plannerWaitStepIdx !== overallMaxIdx || this.#awaitingPlannerSinceMs === undefined) {
+        this.#plannerWaitStepIdx = overallMaxIdx;
+        this.#awaitingPlannerSinceMs = nowMs;
+      }
+    } else {
+      this.#awaitingPlannerSinceMs = undefined;
+      this.#plannerWaitStepIdx = -1;
     }
     const retryAttempted = this.#sawRetrySinceLastPoll;
     this.#sawRetrySinceLastPoll = false;
@@ -1050,20 +1083,27 @@ export class AgyThoughtTracker {
   }
 
   /**
-   * True when `acp-server-*.log` confirmed an upstream request or open SSE stream
-   * that is still awaiting its first SQLite planner step (TTFB / high-effort prefill).
+   * True when `cli-*.log` / `acp-server-*.log` or SQLite step state shows an
+   * upstream request or post-step planner call still awaiting its first SQLite
+   * planner step (TTFB / high-effort prefill, up to `agy`'s `5m0s` stream timeout).
    */
   get isAwaitingUpstreamStream(): boolean {
     const nowMs = this.#now();
     if (
       this.#activeStreamStartedAtMs !== undefined &&
-      nowMs - this.#activeStreamStartedAtMs < 180_000
+      nowMs - this.#activeStreamStartedAtMs < UPSTREAM_STREAM_WAIT_WINDOW_MS
     ) {
       return true;
     }
     if (
       this.#awaitingUpstreamHeadersSinceMs !== undefined &&
-      nowMs - this.#awaitingUpstreamHeadersSinceMs < 180_000
+      nowMs - this.#awaitingUpstreamHeadersSinceMs < UPSTREAM_STREAM_WAIT_WINDOW_MS
+    ) {
+      return true;
+    }
+    if (
+      this.#awaitingPlannerSinceMs !== undefined &&
+      nowMs - this.#awaitingPlannerSinceMs < UPSTREAM_STREAM_WAIT_WINDOW_MS
     ) {
       return true;
     }
@@ -1215,6 +1255,8 @@ export class AgyThoughtTracker {
       this.#lastApiError = undefined;
       this.#lastApiErrorRetryEndsAtMs = 0;
       this.#awaitingUpstreamHeadersSinceMs = this.#now();
+      this.#exitedAtStepIdx = -1;
+      this.#sawStreamExit = false;
       return true;
     }
     if (
@@ -1226,6 +1268,8 @@ export class AgyThoughtTracker {
       this.#lastApiError = undefined;
       this.#lastApiErrorRetryEndsAtMs = 0;
       this.#awaitingUpstreamHeadersSinceMs = undefined;
+      this.#awaitingPlannerSinceMs = undefined;
+      this.#plannerWaitStepIdx = -1;
     }
     if (activity.type === "checkpoint") {
       this.#lastApiError = undefined;
@@ -1398,7 +1442,7 @@ export class AgyThoughtTracker {
         } catch {}
       }
       candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
-      for (const candidate of candidates.slice(0, 4)) {
+      for (const candidate of candidates.slice(0, 16)) {
         const tailBytes = Math.min(candidate.size, 131_072);
         const startOffset = candidate.size - tailBytes;
         const buf = readFileSlice(candidate.path, startOffset, tailBytes);
@@ -1500,6 +1544,15 @@ export class AgyThoughtTracker {
         const parsedMs = parseGlogTimestampMs(line, nowMs);
         this.#pendingMonitorCalls = 0;
         this.#awaitingUpstreamHeadersSinceMs = exited ? undefined : (parsedMs ?? nowMs);
+        if (exited) {
+          this.#awaitingPlannerSinceMs = undefined;
+          this.#plannerWaitStepIdx = -1;
+          this.#exitedAtStepIdx = overallMaxIdx;
+          this.#sawStreamExit = true;
+        } else {
+          this.#exitedAtStepIdx = -1;
+          this.#sawStreamExit = false;
+        }
         this.#activeStreamStartedAtMs = undefined;
         this.#activeStreamResponseId = undefined;
         this.#streamStartMaxIdx = -1;
@@ -1516,6 +1569,7 @@ export class AgyThoughtTracker {
       );
       if (retryMatch) {
         this.#awaitingUpstreamHeadersSinceMs = undefined;
+        this.#awaitingPlannerSinceMs = undefined;
         this.#activeStreamStartedAtMs = undefined;
         this.#activeStreamResponseId = undefined;
         this.#streamStartMaxIdx = -1;
@@ -1577,7 +1631,11 @@ export class AgyThoughtTracker {
           continue;
         }
         const parsedMs = isInitialReplay ? parseGlogTimestampMs(line, nowMs) : undefined;
-        if (isInitialReplay && parsedMs !== undefined && nowMs - parsedMs > 180_000) {
+        if (
+          isInitialReplay &&
+          parsedMs !== undefined &&
+          nowMs - parsedMs > UPSTREAM_STREAM_WAIT_WINDOW_MS
+        ) {
           continue;
         }
         // A response arrived, so any earlier API error was recovered by agy's own retry.

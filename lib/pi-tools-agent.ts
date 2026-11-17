@@ -28,6 +28,10 @@ export const EAGER_PI_BRIDGE_TOOLS = [
  * so models retain native image viewing (`view_file`, avoiding ACP MCP image
  * offloading), image generation, and built-in web fallback when Pi web
  * extensions are not installed.
+ *
+ * Note: In `agy 1.5.0+`, `"view_file"` already resolves to the built-in
+ * `read_file` declaration; listing both `"read_file"` and `"view_file"` fails
+ * executor construction with a duplicate `"read_file"` tool conflict.
  */
 export const PI_TOOLS_AGENT_NATIVE_TOOLS = [
   "view_file",

@@ -106,6 +106,7 @@ import {
   GRILL_DEACTIVATED_PROMPT,
   inspectGoalResponseMarkers,
   inspectGrillResponseMarker,
+  piSystemInstructionsPrompt,
   stripPiToolInventory,
 } from "../lib/prompt.ts";
 import { AgyPiBridge } from "../lib/bridge.ts";
@@ -161,7 +162,9 @@ test("Pi tool agent scopes MCP to its bridge and removes only its own configurat
   const agentFile = path.join(root, agent.name, "agent.md");
   const agentMarkdown = await readFile(agentFile, "utf8");
   const definition = JSON.parse(agentMarkdown.split("---\n")[1]);
+  assert.equal((PI_TOOLS_AGENT_NATIVE_TOOLS as readonly string[]).includes("read_file"), false);
   assert.equal(PI_TOOLS_AGENT_NATIVE_TOOLS.includes("view_file"), true);
+  assert.equal(agentMarkdown.includes("read_file"), true);
   assert.equal(agentMarkdown.includes("view_file"), true);
   assert.deepEqual(definition.tools, [...PI_TOOLS_AGENT_NATIVE_TOOLS]);
   assert.equal(EAGER_PI_BRIDGE_TOOLS_CONFIG.pi__web_search?.eager, true);
@@ -2351,6 +2354,16 @@ test("stripPiToolInventory strips Pi 1.5.0 <tools>, Pi 1.4.0 <tools>, and legacy
   });
   assert.match(relayedDocs, /docs\/mcp\.md/);
   assert.match(relayedDocs, /docs\/codemode\.md/);
+  assert.doesNotMatch(relayedDocs, /pi__read/);
+
+  const nativeWrapped = piSystemInstructionsPrompt(relayedDocs);
+  assert.match(nativeWrapped, /<session_instructions>/);
+  assert.doesNotMatch(nativeWrapped, /pi__read/);
+
+  const piToolsWrapped = piSystemInstructionsPrompt(pi150Prompt);
+  assert.match(piToolsWrapped, /<session_instructions>/);
+  assert.match(piToolsWrapped, /pi__read/);
+  assert.doesNotMatch(piToolsWrapped, /- ask_user_question:/);
 });
 
 test("renderFooterLines clips long gitBranch/sessionName and keeps model + thinking intact on Row 1", () => {

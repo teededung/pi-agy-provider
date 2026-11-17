@@ -11,9 +11,9 @@ export function piToolsAgentPrompt(serverName: string): string {
     "# System Prompt",
     "You are the agent for the current Pi coding session. Complete the user request using Pi tools.",
     `Your tools are provided by the MCP server ${serverName}. Use the exact MCP tool names and schemas it exposes.`,
-    "Relayed Pi instructions refer to tools by their Pi names; match them to the tools exposed by this bridge.",
-    "Use the Pi bridge for file access, editing, commands, web access, skills, and other work. Pi handles tool execution, permissions, and tool results.",
-    "Prefer pi__read for text and code files; for local image files (or if an MCP image result is offloaded to disk), use native view_file so the image stays directly visible in your model context.",
+    "Session instructions refer to tools by their short names (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `ask_user_question`, `codemode`); map them to the `pi__*` tools exposed by this bridge (`pi__read`, `pi__bash`, `pi__edit`, `pi__write`, `pi__grep`, `pi__find`, `pi__ls`, `pi__ask_user_question`, `pi__codemode`).",
+    "Use the Pi bridge for file access, editing, commands, batching (`pi__codemode`), web access, skills, and user questionnaires (`pi__ask_user_question`). Never call native `ask_question` because headless mode auto-settles it without waiting for the user.",
+    "Prefer `pi__read` for text and code files; for local image files (or if an MCP image result is offloaded to disk), use native `read_file` or `view_file` so the image stays directly visible in your model context.",
     "Pi background work belongs to Pi tools; use the bridged tools to inspect or manage it.",
   ].join("\n\n");
 }
@@ -79,7 +79,7 @@ export function attachedImagesPrompt(imagePaths: readonly string[]): string {
   if (imagePaths.length === 0) return "";
   const list = imagePaths.map((filePath, idx) => `- Image ${idx + 1}: ${filePath}`).join("\n");
   return [
-    "[Attached user image(s) saved to disk because the agy print interface is text-only — inspect them with your file-reading tool (`pi__read` or `view_file`):",
+    "[Attached user image(s) saved to disk because the agy print interface is text-only — inspect them with your file-reading tool (`pi__read`, `read_file`, or `view_file`):",
     list,
     "]",
   ].join("\n");
@@ -190,9 +190,18 @@ export interface PiDocsPaths {
  * pi-side agent config — not agy input. Summary requests never see this
  * block: they keep their own instructions.
  */
+export const PI_BRIDGE_ROUTING_NOTES = [
+  "- Tool routing: When bridged `pi__*` MCP tools (`pi__read`, `pi__edit`, `pi__write`, `pi__bash`, `pi__grep`, `pi__find`, `pi__ls`, `pi__ask_user_question`, `pi__codemode`) are available, map short tool names in `<rules>` (`read`, `edit`, `write`, `bash`, `ask_user_question`, `codemode`) to their `pi__*` equivalents.",
+  "- Images & questions: Use `pi__read` for text/code files and native `read_file` or `view_file` for local/offloaded image files so images stay directly visible in context. Never call headless native `ask_question` (it auto-settles without waiting); use `pi__ask_user_question` when available or ask directly in Markdown.",
+].join("\n");
+
 export function buildAgyRelayedInstructions(piDocs: PiDocsPaths): string {
   return [
     ...(piDocs.cwd ? [`Current working directory: ${piDocs.cwd}`, ""] : []),
+    "Session tool mode: Native Antigravity tools (`/agy-tools off`)",
+    "- Use your native Antigravity tools for file reading, editing, search, and shell commands; if `pi__activate_skill` is exposed via MCP, use it to load Pi-only skills.",
+    "- Never call headless native `ask_question` (it auto-settles without waiting); ask clarifying questions directly in Markdown and end your turn.",
+    "",
     "Pi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):",
     `- Main documentation: ${piDocs.readme}`,
     `- Additional docs: ${piDocs.docs}`,
@@ -203,27 +212,28 @@ export function buildAgyRelayedInstructions(piDocs: PiDocsPaths): string {
   ].join("\n");
 }
 
-/** agy's CLI has no system-role input; relay Pi instructions explicitly as prompt text. */
+/** Format session instructions for CLI executors that lack a separate system-prompt channel. */
 export function piSystemInstructionsPrompt(instructions: string): string {
   const relayed = stripPiToolInventory(instructions);
+  const hasPiRules = /<rules>[\s\S]*?<\/rules>/.test(relayed);
   return [
-    "## Current Pi instructions",
-    "The following is Pi's current instruction snapshot, relayed as user-prompt text because this CLI has no system-prompt channel. It replaces any earlier Pi instruction snapshot in this conversation; native system instructions still take precedence.",
-    "Use only the actual agy or Pi bridge tool schemas available to you, while respecting applicable project and user guidance.",
+    "<session_instructions>",
+    "Apply the following session rules and project context for this turn (superseding any earlier `<session_instructions>` block in this conversation while keeping native system rules intact).",
+    ...(hasPiRules ? [PI_BRIDGE_ROUTING_NOTES] : []),
     relayed ||
-      "Pi's instruction snapshot is now empty. Stop applying earlier relayed Pi instructions.",
-    "## End of Pi instructions",
+      "No additional session instructions are active for this turn.",
+    "</session_instructions>",
   ].join("\n\n");
 }
 
 /** Rehydrate a fresh agy conversation from the active branch of a pi session. */
 export function restoredPiContextPrompt(transcript: string): string {
   return [
-    "## Restored pi conversation context",
-    "",
-    "This fresh agy conversation is continuing the active pi history, including any work with another provider, session resume, fork, or branch move. Treat the transcript below as prior conversation context, then answer the current user request that follows it.",
+    "<restored_session_context>",
+    "This conversation is continuing prior session history (including earlier turns, session resume, fork, or branch move). Treat the transcript below as prior conversation context, then answer the current user request that follows it.",
     "",
     transcript,
+    "</restored_session_context>",
     "",
     "## Current user request",
   ].join("\n");

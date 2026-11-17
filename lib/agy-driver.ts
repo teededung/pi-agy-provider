@@ -184,8 +184,8 @@ const TERM_CLOSE_MS = 500;
  */
 const STALL_PARKED_POLL_MS = 10_000;
 const STALL_PARKED_LIMIT = 2;
-const MAX_MODEL_LIVENESS_GRACES = 3;
-const MAX_UPSTREAM_STREAM_GRACES = 1;
+const MAX_MODEL_LIVENESS_GRACES = 6;
+const MAX_UPSTREAM_STREAM_GRACES = 6;
 /**
  * While a tool step is ACTIVE, poll the off-stream transcript this often for a
  * final answer agy is withholding. agy emits nothing on stdout for the whole
