@@ -259,7 +259,7 @@ function appendProcessArgs(args: string[], request: AgyTurnRequest): string[] {
 }
 
 export const READ_ONLY_AGY_SETTINGS_JSON = JSON.stringify({
-  agentMode: "default",
+  agentMode: "",
   toolPermission: "strict",
   permissions: { allow: [] },
 });

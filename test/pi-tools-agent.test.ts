@@ -3368,6 +3368,7 @@ test("agy 1.5.0 alignment: Retry-After backoff tracking, readOnlyPermissions arg
   const settingsIdx = readOnlyDriverArgs.indexOf("--settings");
   assert.ok(settingsIdx >= 0);
   assert.equal(readOnlyDriverArgs[settingsIdx + 1], READ_ONLY_AGY_SETTINGS_JSON);
+  assert.equal(JSON.parse(READ_ONLY_AGY_SETTINGS_JSON).agentMode, "");
 
   const readOnlyOneShotArgs = buildOneShotAgyArgs({
     prompt: "Summarize this conversation",
