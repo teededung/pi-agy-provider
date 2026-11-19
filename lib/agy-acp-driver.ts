@@ -447,6 +447,7 @@ export class AgyAcpDriverSession implements AgyTurnExecutor {
       {
         ...(this.#logDir ? { logDir: this.#logDir } : {}),
         ...(child.pid !== undefined ? { pid: child.pid } : {}),
+        ...(request.model ? { modelId: request.model } : {}),
         emitThinkingDeltas: false,
         emitStepUsage: true,
       },

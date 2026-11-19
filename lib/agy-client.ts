@@ -433,7 +433,11 @@ async function runSingleAgyTurn(request: AgyTurnRequest): Promise<AgyTurnOutcome
       resolve(outcome);
       return;
     }
-    const thoughtTracker = new AgyThoughtTracker(request.conversationId);
+    const thoughtTracker = new AgyThoughtTracker(
+      request.conversationId,
+      undefined,
+      request.model ? { modelId: request.model } : undefined,
+    );
     if (request.conversationId) {
       prepareAgyConversationBridgeMetadata(
         request.conversationId,

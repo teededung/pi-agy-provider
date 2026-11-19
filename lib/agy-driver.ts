@@ -308,8 +308,10 @@ export class AgyDriverSession implements AgyTurnExecutor {
     conversationId: string | undefined,
   ) => Promise<AgySubagentProbeResult> = agyProbeSubagents;
   /** Test seam for creating per-turn SQLite/CLI-log thought & compaction trackers. */
-  #createThoughtTracker: (conversationId?: string) => AgyThoughtTracker = (conversationId) =>
-    new AgyThoughtTracker(conversationId);
+  #createThoughtTracker: (conversationId?: string, modelId?: string) => AgyThoughtTracker = (
+    conversationId,
+    modelId,
+  ) => new AgyThoughtTracker(conversationId, undefined, modelId ? { modelId } : undefined);
   #parkedPollMs = STALL_PARKED_POLL_MS;
   #parkedLimit = STALL_PARKED_LIMIT;
   /** Early parked-answer watch interval; 0 disables it (stall budget only). */
@@ -590,6 +592,7 @@ export class AgyDriverSession implements AgyTurnExecutor {
       conversationReported: false,
       thoughtTracker: this.#createThoughtTracker(
         request.conversationId ?? this.#boundConversationId,
+        request.model,
       ),
       stallGraces: 0,
       parkedChecks: 0,
@@ -1522,7 +1525,7 @@ function configuredDriverMode(env: NodeJS.ProcessEnv): string | undefined {
 }
 
 export function resolveAgyDriverMode(env: NodeJS.ProcessEnv = process.env): AgyDriverMode {
-  return normalizeAgyDriverMode(configuredDriverMode(env)) ?? "acp";
+  return normalizeAgyDriverMode(configuredDriverMode(env)) ?? "stream-json";
 }
 
 export function createAgyTurnExecutorForMode(mode: AgyDriverMode): AgyTurnExecutor {
@@ -1539,7 +1542,7 @@ export class SwitchableAgyTurnExecutor implements AgyTurnExecutor {
   #mode: AgyDriverMode;
   #current: AgyTurnExecutor;
 
-  constructor(initialMode: AgyDriverMode = "acp") {
+  constructor(initialMode: AgyDriverMode = "stream-json") {
     this.#mode = initialMode;
     this.#current = createAgyTurnExecutorForMode(initialMode);
   }

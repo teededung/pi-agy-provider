@@ -1463,8 +1463,8 @@ test("deleteDisposableAgyConversation recursively deletes subagent trees and cle
   }
 });
 
-test("reduceAgyStream strips invisible U+FFF9-U+FFFB chars without truncating subsequent deltas and RECOMMENDED_AGY_VERSION is 1.5.10", () => {
-  assert.equal(RECOMMENDED_AGY_VERSION, "1.5.10");
+test("reduceAgyStream strips invisible U+FFF9-U+FFFB chars without truncating subsequent deltas and RECOMMENDED_AGY_VERSION is 1.5.12", () => {
+  assert.equal(RECOMMENDED_AGY_VERSION, "1.5.12");
   assert.equal(stripHallucinatedTurnSuffix("hello \uFFF9code\uFFFA\uFFFB world"), "hello code world");
 
   const stream = [
@@ -2535,22 +2535,37 @@ test("AgyThoughtTracker detects live compaction from SQLite + CLI logs and extra
     nowMs += 3_000;
     assert.equal(tracker.poll().isCompacting, false);
 
-    // Compaction streamGenerateContent starts without a new SQLite step
-    await writeFile(
-      logPath,
-      [
-        `I1105 07:36:32.000000 1 conversation_manager.go:874] Forwarding user message to conversation ${cid} (items=1, media=0)`,
-        `I1105 07:37:55.513869 4794 llm_monitor.go:712] LLM Monitor sir_flash_lite: Calling LLM (model: MODEL_TIER_FLASH_LITE)`,
-        `I1105 07:37:56.265503 4796 http_helpers.go:365] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0x1`,
-        `I1105 07:37:57.545955 4793 runner.go:839] Monitor sir_flash_lite FINISHED: triggered=false`,
-        `I1105 07:38:08.577324 4828 http_helpers.go:365] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0x8fc6`,
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    // Before 1.5s grace: still false
-    nowMs += 500;
-    assert.equal(tracker.poll().isCompacting, false);
+  // Compaction streamGenerateContent starts without a new SQLite step.
+  // First verify a Gemini 4 (512k) tracker at ~245k does NOT falsely claim isCompacting!
+  const gemini4Tracker = new AgyThoughtTracker(cid, conversationsDir, {
+    logDir,
+    modelId: "gemini-4-neon",
+    now: () => nowMs,
+  });
+  assert.equal(gemini4Tracker.poll().isCompacting, false);
+
+  await writeFile(
+    logPath,
+    [
+      `I1105 07:36:32.000000 1 conversation_manager.go:874] Forwarding user message to conversation ${cid} (items=1, media=0)`,
+      `I1105 07:37:55.513869 4794 llm_monitor.go:712] LLM Monitor sir_flash_lite: Calling LLM (model: MODEL_TIER_FLASH_LITE)`,
+      `I1105 07:37:56.265503 4796 http_helpers.go:365] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0x1`,
+      `I1105 07:37:57.545955 4793 runner.go:839] Monitor sir_flash_lite FINISHED: triggered=false`,
+      `I1105 07:38:08.577324 4828 http_helpers.go:365] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0x8fc6`,
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  // Before 1.5s grace: still false
+  nowMs += 500;
+  assert.equal(tracker.poll().isCompacting, false);
+  assert.equal(gemini4Tracker.poll().isCompacting, false);
+
+  // After 1.5s: default tracker (>=100k) triggers, while Gemini 4 (512k -> 358k threshold) stays false at 245k!
+  nowMs += 1_500;
+  assert.equal(gemini4Tracker.poll().isCompacting, false);
+  gemini4Tracker.close();
+  nowMs -= 1_500;
 
     // After 1.5s with no new SQLite step: isCompacting turns true!
     nowMs += 1_500;
@@ -3470,6 +3485,17 @@ test("parseAgyModels collapses gemini-4-hydrogen-xhigh into one model with 4 thi
   }
   const completions = getAgyConsultCompletions("hydrogen", parsed);
   assert.ok(completions?.some((item) => item.label === "hydrogen4"));
+
+  // Gemini 4 Neon (agy 1.5.12): 4 thinking levels (including xhigh) and `/m neon` alias/autocomplete
+  const neonConsult = resolveAgyConsultSpec("neon4 inspect");
+  assert.equal(neonConsult.ok, true);
+  if (neonConsult.ok) {
+    assert.equal(neonConsult.model.id, "gemini-4-neon");
+    assert.equal(neonConsult.effort, "xhigh");
+  }
+  const neonCompletions = getAgyConsultCompletions("neon");
+  assert.ok(neonCompletions?.some((item) => item.label === "neon4"));
+  assert.equal(resolveAgyEffectiveContextLimit("gemini-4-neon-xhigh"), AGY_GEMINI4_CONTEXT_LIMIT);
 });
 
 test("neutralizeAgyInterceptedSlashCommands, cacheRetention=none isolation, and Gemini 4 pricing", async () => {

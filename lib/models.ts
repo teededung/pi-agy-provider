@@ -157,6 +157,12 @@ export function resolveAgyModelEffort(
 /** Complete fallback catalog from `agy models`, including effort constraints. */
 export const ALL_FALLBACK_MODELS: AgyModelInfo[] = [
   {
+    id: "gemini-4-neon",
+    name: "Gemini 4 Neon",
+    supportedEfforts: ["high", "xhigh", "medium", "low"],
+    defaultEffort: "high",
+  },
+  {
     id: "gemini-4-argon",
     name: "Gemini 4 Argon",
     supportedEfforts: ["medium", "high", "low"],
@@ -296,6 +302,7 @@ export function modelCacheIsFresh(
 export const CONSULT_MODEL_ALIASES: Readonly<Record<string, string>> = {
   opus: "claude-opus-5-5",
   sonnet: "claude-sonnet-5-5",
+  neon: "gemini-4-neon",
   argon: "gemini-4-argon",
   carbon: "gemini-4-carbon",
   hydrogen: "gemini-4-hydrogen",
@@ -368,7 +375,7 @@ export type ResolvedAgyConsultSpec =
     };
 
 export const CONSULT_USAGE_MESSAGE =
-  'Usage: /m <opus|sonnet|argon|carbon|hydrogen|flash>[1|2|3|4] [prompt] (thinking: 1=low, 2=mid, 3=high, 4=xhigh, omit=session current)';
+  'Usage: /m <opus|sonnet|neon|argon|carbon|hydrogen|flash>[1|2|3|4] [prompt] (thinking: 1=low, 2=mid, 3=high, 4=xhigh, omit=session current)';
 
 /**
  * Parse `/m <spec> [prompt]` arguments.
@@ -399,7 +406,7 @@ export function resolveAgyConsultSpec(
   let explicitEffort: AgyEffort | undefined;
 
   const aliasMatch = rawSpec.match(
-    /^(opus|sonnet|argon|carbon|hydrogen|flash)(?:[-:]?(1|2|3|4|low|mid|medium|high|xhigh|extra|max))?$/i,
+    /^(opus|sonnet|neon|argon|carbon|hydrogen|flash)(?:[-:]?(1|2|3|4|low|mid|medium|high|xhigh|extra|max))?$/i,
   );
   if (aliasMatch) {
     modelToken = aliasMatch[1]!;
@@ -418,7 +425,7 @@ export function resolveAgyConsultSpec(
   if (!model) {
     return {
       ok: false,
-      error: `Unknown model "${rawSpec}". Supported aliases: opus, sonnet, argon, carbon, hydrogen, flash (with optional 1=low, 2=mid, 3=high, 4=xhigh).`,
+      error: `Unknown model "${rawSpec}". Supported aliases: opus, sonnet, neon, argon, carbon, hydrogen, flash (with optional 1=low, 2=mid, 3=high, 4=xhigh).`,
     };
   }
 
@@ -454,7 +461,7 @@ export function getAgyConsultCompletions(
   if (argumentPrefix.includes(" ")) return null;
   const prefix = argumentPrefix.trim().toLowerCase();
   const activeId = currentModelId?.trim().toLowerCase();
-  const aliases = ["hydrogen", "carbon", "argon", "opus", "sonnet", "flash"] as const;
+  const aliases = ["neon", "hydrogen", "carbon", "argon", "opus", "sonnet", "flash"] as const;
   const items: Array<{ value: string; label: string; description: string }> = [];
 
   for (const alias of aliases) {

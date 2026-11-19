@@ -261,6 +261,9 @@ test("driver mode normalizes aliases, persists under antigravity.driver, and swi
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = path.join(dir, "settings.json");
 
+  // Default driver mode (with no env override and no saved setting) is stream-json
+  assert.equal(resolveAgyDriverMode({ PI_CODING_AGENT_DIR: dir }), "stream-json");
+
   await writeFile(
     file,
     JSON.stringify({ "pi-agy": { turnTimeoutMs: 1000, driver: "legacy" }, antigravity: { toolMode: "pi" } }),

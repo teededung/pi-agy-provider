@@ -8,8 +8,8 @@ import which from "which";
 import { killAgyTree, trackAgyChild, untrackAgyChild } from "./agy-children.ts";
 
 export const MIN_AGY_VERSION = "1.1.22";
-/** Soft target: includes ACP session/cancel fixes (1.5.4+), 1.5.8–1.5.9 ACP auth/error/diff fixes, and 1.5.10 10m stream / 4m rate-limit / ACP background cleanup fixes. */
-export const RECOMMENDED_AGY_VERSION = "1.5.10";
+/** Soft target: includes ACP session/cancel fixes (1.5.4+), 1.5.8–1.5.10 ACP/10m-stream/4m-retry fixes, and 1.5.11–1.5.12 Gemini 4 Neon + connection-reset retry fixes. */
+export const RECOMMENDED_AGY_VERSION = "1.5.12";
 export function isBelowRecommendedAgy(version: string | undefined): boolean {
   return Boolean(version && valid(version) && !gte(version, RECOMMENDED_AGY_VERSION));
 }

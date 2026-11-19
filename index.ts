@@ -4335,7 +4335,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 
   const consultCommandOptions = {
     description:
-      "Switch or one-shot consult model: /m <opus|sonnet|argon|carbon|hydrogen|flash>[1|2|3|4] [prompt] (omit prompt to switch; with prompt, consults for 1 turn)",
+      "Switch or one-shot consult model: /m <opus|sonnet|neon|argon|carbon|hydrogen|flash>[1|2|3|4] [prompt] (omit prompt to switch; with prompt, consults for 1 turn)",
     getArgumentCompletions: (argumentPrefix: string) => {
       const probedModelId = activeSessionCtx
         ? probeCtx(() =>

@@ -809,7 +809,7 @@ test("ACP helper unit checks: usage deduplication, bridged MCP step matching, pe
   assert.equal(isBridgedMcpStep({ name: "pi__bash", args: {} }, "pi-123"), true);
   assert.equal(isBridgedMcpStep({ name: "search_web", args: {} }, "pi-123"), false);
 
-  // 5. createAgyTurnExecutor selects acp by default, persistent for stream-json, and one-shot for 0
+  // 5. createAgyTurnExecutor selects persistent (stream-json) by default, acp when requested, and one-shot for 0
   assert.equal(createAgyTurnExecutor({ PI_ANTIGRAVITY_DRIVER: "acp" }).snapshot().mode, "acp");
   assert.equal(
     createAgyTurnExecutor({ PI_ANTIGRAVITY_DRIVER: "stream-json" }).snapshot().mode,

@@ -23,6 +23,7 @@ import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { resolveAgyEffectiveContextLimit } from "./footer.ts";
 import { cleanAgyCheckpointSummary } from "./agy-compaction.ts";
 import type { AgyActivity, AgyUsage } from "./reducer.ts";
 
@@ -37,8 +38,19 @@ const STEP_STATUS_DONE = 3;
 const STEP_STATUS_CANCELED = 5;
 const STEP_STATUS_GENERATING = 8;
 
-/** Minimum context tokens before an unindexed streamGenerateContent call can be compaction. */
+/** Minimum context tokens before an unindexed streamGenerateContent call can be compaction (when modelId is unknown). */
 const MIN_COMPACTION_CONTEXT_TOKENS = 100_000;
+
+/**
+ * Compute minimum context occupancy before an unindexed `streamGenerateContent`
+ * log line is treated as a live compaction call (SQLite `CHECKPOINT` steps still
+ * report compaction immediately at any token count).
+ */
+export function minCompactionContextTokensForModel(modelId?: string): number {
+  if (!modelId) return MIN_COMPACTION_CONTEXT_TOKENS;
+  const limit = resolveAgyEffectiveContextLimit(modelId);
+  return limit >= 500_000 ? Math.round(limit * 0.7) : Math.round(limit * 0.55);
+}
 
 /** Default total attempts in agy's internal model retry loop (`ModelRequestStatus.max_attempts = 10`). */
 export const AGY_DEFAULT_MAX_RETRY_ATTEMPTS = 10;
@@ -174,6 +186,8 @@ export interface AgyThoughtTrackerOptions {
   logDir?: string;
   /** Spawned `agy acp` / `agy` PID for direct `acp-server-*-<pid>.log` binding. */
   pid?: number;
+  /** Active model ID used to scale the CLI-log compaction heuristic threshold. */
+  modelId?: string;
   /** Clock override for deterministic compaction-grace tests. */
   now?: () => number;
   /**
@@ -732,6 +746,7 @@ export class AgyThoughtTracker {
   #emittedRetrying = false;
   #emitThinkingDeltas = true;
   #emitStepUsage = false;
+  #minCompactionContextTokens = MIN_COMPACTION_CONTEXT_TOKENS;
   #checkpointDetailsByStepId = new Map<number, AgyCheckpointSummaryInfo>();
   #streamEmittedCheckpoints = new Set<number>();
 
@@ -743,6 +758,7 @@ export class AgyThoughtTracker {
     this.#conversationsDir = conversationsDir;
     this.#logDir = options?.logDir ?? defaultLogDirFromConversationsDir(conversationsDir);
     this.#pid = options?.pid;
+    this.#minCompactionContextTokens = minCompactionContextTokensForModel(options?.modelId);
     this.#now = options?.now ?? Date.now;
     this.#emitThinkingDeltas = options?.emitThinkingDeltas ?? true;
     this.#emitStepUsage = options?.emitStepUsage ?? false;
@@ -1520,7 +1536,7 @@ export class AgyThoughtTracker {
     }
 
     return (
-      (this.#lastContextTokens ?? 0) >= MIN_COMPACTION_CONTEXT_TOKENS &&
+      (this.#lastContextTokens ?? 0) >= this.#minCompactionContextTokens &&
       overallMaxIdx >= 2 &&
       this.#compactedAfterIdx < overallMaxIdx &&
       nowMs - this.#activeStreamStartedAtMs >= COMPACTION_STREAM_GRACE_MS
