@@ -3591,6 +3591,105 @@ test("neutralizeAgyInterceptedSlashCommands, cacheRetention=none isolation, and 
   }
 });
 
+test("streamAntigravity ignores stale historical Individual quota reached errors leaked by agy stream-json on subsequent healthy Gemini turns", async () => {
+  const staleErr =
+    "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h35m28s.";
+  let turnNum = 0;
+  const runtime = createAntigravityRuntime(async (request) => {
+    turnNum += 1;
+    if (turnNum === 1) {
+      // Turn 1 (Claude): genuine quota error with empty response -> MUST fail as error
+      const resActivity = {
+        type: "result" as const,
+        status: "ERROR" as const,
+        response: "",
+        error: staleErr,
+      };
+      request.onActivity?.(resActivity);
+      return {
+        conversationId: "conv-stale-quota",
+        status: "ERROR",
+        error: staleErr,
+        response: "",
+        finished: true,
+        activities: [resActivity],
+      };
+    }
+    // Turn 2 (Gemini on same conversation): full valid answer, but agy stream-json
+    // leaks Turn 1's historical ERROR_MESSAGE into result.error -> MUST succeed cleanly!
+    const response = "Healthy Gemini answer after switching off Claude.";
+    const resActivity = {
+      type: "result" as const,
+      status: "ERROR" as const,
+      response,
+      error: staleErr,
+    };
+    request.onActivity?.(resActivity);
+    return {
+      conversationId: "conv-stale-quota",
+      status: "ERROR",
+      error: staleErr,
+      response,
+      finished: true,
+      activities: [resActivity],
+    };
+  });
+  const service = runtime.runSync(AntigravityRuntime);
+  try {
+    const streamFn = streamAntigravity(
+      runtime,
+      service,
+      new AgyReplayStore(),
+      new AgyPiBridge("unused"),
+    );
+    const claudeModel = {
+      id: "claude-sonnet-5-5",
+      name: "Claude Sonnet 5.5",
+      api: "antigravity-stream-json",
+      provider: "antigravity",
+      baseUrl: "",
+      reasoning: true,
+      input: ["text", "image"],
+      cost: pricingForModel("claude-sonnet-5-5"),
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    } as Model<string>;
+    const geminiModel = {
+      ...claudeModel,
+      id: "gemini-4-neon",
+      name: "Gemini 4 Neon",
+      cost: pricingForModel("gemini-4-neon"),
+    } as Model<string>;
+
+    const res1 = await streamFn(
+      claudeModel,
+      { messages: [{ role: "user", content: "turn 1 on claude", timestamp: 1 }] } as unknown as TranscriptContext,
+    ).result();
+    assert.equal(res1.stopReason, "error");
+    assert.equal(res1.errorMessage, staleErr);
+
+    const res2 = await streamFn(
+      geminiModel,
+      {
+        messages: [
+          { role: "user", content: "turn 1 on claude", timestamp: 1 },
+          res1,
+          { role: "user", content: "turn 2 on gemini", timestamp: 2 },
+        ],
+      } as unknown as TranscriptContext,
+    ).result();
+    assert.equal(res2.stopReason, "stop");
+    assert.equal(res2.errorMessage, undefined);
+    assert.ok(
+      res2.content.some(
+        (c) => c.type === "text" && c.text.includes("Healthy Gemini answer after switching off Claude."),
+      ),
+    );
+  } finally {
+    await runtime.dispose();
+  }
+});
+
 
 
 

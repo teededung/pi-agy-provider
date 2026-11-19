@@ -2495,6 +2495,17 @@ export function streamAntigravity(
               // on stopReason "error", so complete only genuine transient tail
               // interruptions — never early cut-offs (print_timeout/interrupted)
               // or hook/fatal errors that merely follow partial text.
+              const priorAssistantErrors = new Set(
+                context.messages
+                  .filter(
+                    (m): m is AssistantMessage =>
+                      m.role === "assistant" &&
+                      typeof m.errorMessage === "string" &&
+                      Boolean(m.errorMessage.trim()),
+                  )
+                  .map((m) => m.errorMessage!.trim()),
+              );
+
               const earlyTermination =
                 activity.finishedReason === "print_timeout" ||
                 activity.finishedReason === "interrupted";
@@ -2505,7 +2516,22 @@ export function streamAntigravity(
                 !OVERFLOW_PATTERN.test(activity.error ?? "") &&
                 RECOVERED_INTERRUPTION_PATTERN.test(activity.error ?? "");
 
-              if (activity.status === "ERROR" && !recovered) {
+              // agy `--output-format stream-json` scans backwards across the entire
+              // conversation's SQLite steps when populating `result.error`. If an
+              // earlier turn failed (e.g. Claude hit `Individual quota reached`),
+              // subsequent healthy turns on Gemini in the same conversation still
+              // arrive with `status: "ERROR"` and that stale error alongside a
+              // complete `response`. Ignore stale historical errors when this turn
+              // actually completed with a response.
+              const trimmedError = activity.error?.trim() ?? "";
+              const staleHistoricalError =
+                !earlyTermination &&
+                Boolean(trimmedError) &&
+                ((hasResponse && priorAssistantErrors.has(trimmedError)) ||
+                  (Boolean(activity.response?.trim()) &&
+                    /\bIndividual quota reached\b/i.test(trimmedError)));
+
+              if (activity.status === "ERROR" && !recovered && !staleHistoricalError) {
                 const message =
                   activity.error ||
                   (activity.finishedReason
