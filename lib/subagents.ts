@@ -1223,7 +1223,7 @@ function renderMarkdownBlock(
     getMarkdownTheme(),
     style,
   );
-  const rendered = md.render(Math.max(16, width));
+  const rendered = [...md.render(Math.max(16, width))];
   while (rendered.length > 0 && rendered[rendered.length - 1]!.trim() === "") {
     rendered.pop();
   }

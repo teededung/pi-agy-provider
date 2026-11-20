@@ -239,6 +239,9 @@ export interface AntigravityRuntimeShape {
   }) => boolean;
   readonly reset: Effect.Effect<void, AntigravityRuntimeClosedError>;
   readonly snapshot: Effect.Effect<AntigravityStateSnapshot, AntigravityRuntimeClosedError>;
+  readonly switchDriverMode: (
+    mode: AgyDriverMode,
+  ) => Effect.Effect<void, AntigravityRuntimeClosedError>;
   readonly authenticate: (options?: {
     readonly methodId?: string;
     readonly cwd?: string;

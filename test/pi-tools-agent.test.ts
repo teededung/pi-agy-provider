@@ -89,6 +89,7 @@ import {
   contextHasPriorBoostActivity,
   contextHasPriorGrillActivity,
   contextHasPriorTeamworkActivity,
+  extractTrailingBridgeToolResults,
   isBridgedMcpStep,
   isReadOnlyAsideSystemPrompt,
   latestUserPrompt,
@@ -979,6 +980,111 @@ test("installModelSelectorSelectionPatch preserves user selection when backgroun
   assert.equal(selector.selectedIndex, 1);
   assert.equal(selector.lastRenderedIndex, 1);
   assert.equal(selector.filteredModels[selector.selectedIndex]?.id, "claude-opus-4-6");
+});
+
+test("installModelSelectorSelectionPatch skips Pi 1.5.1+/1.6.0+ selectors with native preferredModel support", () => {
+  class NativeModelSelector {
+    allModels = [
+      { provider: "antigravity", id: "gemini-3-flash" },
+      { provider: "antigravity", id: "claude-sonnet-4-6" },
+      { provider: "antigravity", id: "claude-opus-4-6" },
+    ];
+    filteredModels = [...this.allModels];
+    selectedIndex = 0;
+    updateListCalls = 0;
+
+    loadModelsFromSnapshot(): void {
+      this.filteredModels = [...this.allModels];
+      this.selectedIndex = 0;
+    }
+
+    filterModels(query: string, preferredModel?: { provider: string; id: string }): void {
+      this.filteredModels = query
+        ? this.allModels.filter((m) => m.id.includes(query))
+        : [...this.allModels];
+      const preferredIndex = preferredModel
+        ? this.filteredModels.findIndex(
+            (m) => m.provider === preferredModel.provider && m.id === preferredModel.id,
+          )
+        : -1;
+      this.selectedIndex = preferredIndex >= 0 ? preferredIndex : query ? 0 : this.selectedIndex;
+      this.updateList();
+    }
+
+    updateList(): void {
+      this.updateListCalls += 1;
+    }
+  }
+
+  installModelSelectorSelectionPatch(NativeModelSelector);
+
+  const selector = new NativeModelSelector();
+  selector.loadModelsFromSnapshot();
+  selector.filterModels("claude");
+  selector.selectedIndex = 1; // claude-opus-4-6
+  selector.updateListCalls = 0;
+
+  // Simulate background refresh where the highlighted model disappears under an active query:
+  // Pi 1.6.0 (#12245) resets highlight to top match (0) and updates the list only once.
+  selector.allModels = [
+    { provider: "antigravity", id: "gemini-3-flash" },
+    { provider: "antigravity", id: "claude-sonnet-4-6" },
+    { provider: "antigravity", id: "claude-haiku-4-5" },
+  ];
+  const preferred = selector.filteredModels[selector.selectedIndex];
+  selector.loadModelsFromSnapshot();
+  selector.filterModels("claude", preferred);
+  assert.equal(selector.selectedIndex, 0);
+  assert.equal(selector.updateListCalls, 1);
+});
+
+test("extractTrailingBridgeToolResults ignores all-aborted Esc placeholders from Pi 1.6.0 (#9986)", () => {
+  const abortedOnly = extractTrailingBridgeToolResults(
+    [
+      { role: "user", content: "run two tools" },
+      {
+        role: "toolResult",
+        toolCallId: "pi-bridge-1",
+        toolName: "read",
+        content: [{ type: "text", text: "Operation aborted" }],
+        isError: true,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "pi-bridge-2",
+        toolName: "bash",
+        content: [{ type: "text", text: "Operation aborted" }],
+        isError: true,
+      },
+    ] as unknown as TranscriptContext["messages"],
+    0,
+  );
+  assert.deepEqual(abortedOnly, []);
+
+  // Mixed batch (at least one completed result + one aborted) is still preserved.
+  const mixed = extractTrailingBridgeToolResults(
+    [
+      { role: "user", content: "run two tools" },
+      {
+        role: "toolResult",
+        toolCallId: "pi-bridge-1",
+        toolName: "read",
+        content: [{ type: "text", text: "file contents" }],
+        isError: false,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "pi-bridge-2",
+        toolName: "bash",
+        content: [{ type: "text", text: "Operation aborted" }],
+        isError: true,
+      },
+    ] as unknown as TranscriptContext["messages"],
+    0,
+  );
+  assert.equal(mixed.length, 2);
+  assert.equal(mixed[0]?.content, "file contents");
+  assert.equal(mixed[1]?.isError, true);
 });
 
 test("renderFooterLines renders 2-row footer with agy 300k context bar and filters redundant agy-context status", () => {

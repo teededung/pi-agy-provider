@@ -565,8 +565,12 @@ function flattenToolResultContent(raw: unknown): string {
  * `agy`'s internal MCP timeout), `bridge.resolveCall` cannot deliver the late
  * `toolResult` to that finished turn. Collect the trailing `pi-bridge-*`
  * `toolResult`s so the runtime can replay them into a continuation prompt.
+ *
+ * Pi 1.6.0 (#9986) also writes `"Operation aborted"` error results for unstarted
+ * tool calls when the user presses Esc mid-batch; skip replaying if every
+ * trailing bridge result is just an abort placeholder.
  */
-function extractTrailingBridgeToolResults(
+export function extractTrailingBridgeToolResults(
   messages: TranscriptContext["messages"],
   afterIndex: number,
 ): LateBridgeToolResultEntry[] {
@@ -589,6 +593,12 @@ function extractTrailingBridgeToolResults(
       content: flattenToolResultContent(msg.content),
       isError: msg.isError === true,
     });
+  }
+  if (
+    trailing.length > 0 &&
+    trailing.every((entry) => entry.isError && entry.content.trim() === "Operation aborted")
+  ) {
+    return [];
   }
   return trailing.reverse();
 }

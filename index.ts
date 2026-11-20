@@ -483,10 +483,10 @@ const MODEL_SELECTOR_PENDING_SELECTION_SYMBOL = Symbol.for(
 );
 
 /**
- * Patch Pi's interactive `/model` (`ModelSelectorComponent`) so when background
- * `refreshModels()` completes ("Model catalogs refreshed."), it preserves the
- * model item and `selectedIndex` the user is currently highlighting instead of
- * jumping back to `currentModel` or index 0.
+ * Patch Pi's interactive `/model` (`ModelSelectorComponent`) on older Pi versions
+ * (< 1.5.1, where `filterModels(query)` had no `preferredModel` parameter) so
+ * background `refreshModels()` preserves the user's highlighted item.
+ * Pi 1.5.1+ / 1.6.0+ handles this natively via `filterModels(query, preferredModel)`.
  */
 export function installModelSelectorSelectionPatch(
   SelectorClass: unknown = ModelSelectorComponent,
@@ -497,6 +497,13 @@ export function installModelSelectorSelectionPatch(
     const origLoadModelsFromSnapshot = proto.loadModelsFromSnapshot;
     const origFilterModels = proto.filterModels;
     if (typeof origLoadModelsFromSnapshot !== "function" || typeof origFilterModels !== "function") {
+      return;
+    }
+    // Pi 1.5.1+ passes `preferredModel` to `filterModels(query, preferredModel)` and preserves
+    // selection natively (and in Pi 1.6.0 #12245 resets to top match if the model disappears
+    // under a search query). Skip patching so we do not double-render or override Pi's logic.
+    if (origFilterModels.length >= 2) {
+      proto[MODEL_SELECTOR_PATCH_SYMBOL] = true;
       return;
     }
 
