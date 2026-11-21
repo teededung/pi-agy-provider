@@ -108,7 +108,6 @@ const PROCESS_RECYCLE_CAUSES = new Set<AgyRecycleCause>([
 ]);
 
 interface OpenAcpSessionMeta {
-  systemPrompt: string;
   mcpFingerprint: string;
 }
 
@@ -162,7 +161,13 @@ function isBridgedToolName(name: string): boolean {
 }
 
 export class AgyAcpDriverSession implements AgyTurnExecutor {
-  readonly supportsNativeSystemPrompt = true;
+  /**
+   * Deliver Pi harness instructions via opening `session/prompt` (`<session_instructions>`)
+   * instead of `_meta.antigravity.systemPrompt.append` on `session/new` / `session/resume`.
+   * Putting Pi's preamble, `<docs>`, or arbitrary tool rules into `systemInstruction` can
+   * trigger Cloud Code Assist's `policy_guardian` false-429 retry loops / prompt hangs.
+   */
+  readonly supportsNativeSystemPrompt = false;
   readonly supportsNativeImages = true;
 
   #state: AgyDriverState = "idle";
@@ -1142,9 +1147,6 @@ async function awaitTurnExecution(
   try {
     await Promise.race([client.initialize(request.signal), interrupted]);
 
-    const useNativeSystemPromptSetup = client.supportsSystemPromptAppend();
-    const desiredSystemPrompt = useNativeSystemPromptSetup ? (request.systemPrompt ?? "") : "";
-
     if (sessionId) {
       const existing = hooks.openSessions.get(sessionId);
       if (!existing) {
@@ -1155,7 +1157,6 @@ async function awaitTurnExecution(
               cwd,
               additionalDirectories,
               mcpServers,
-              ...(desiredSystemPrompt ? { systemPromptAppend: desiredSystemPrompt } : {}),
             },
             request.signal,
           ),
@@ -1163,15 +1164,11 @@ async function awaitTurnExecution(
         ]);
         hooks.onSessionState(resumedState);
         rememberOpenSession(hooks.openSessions, client, sessionId, {
-          systemPrompt: desiredSystemPrompt,
           mcpFingerprint,
         });
-      } else if (
-        existing.systemPrompt !== desiredSystemPrompt ||
-        existing.mcpFingerprint !== mcpFingerprint
-      ) {
-        // Refresh in-memory ACP session handle when system instructions or MCP servers
-        // changed while preserving `<sessionId>.db` on disk.
+      } else if (existing.mcpFingerprint !== mcpFingerprint) {
+        // Refresh in-memory ACP session handle when MCP servers changed while
+        // preserving `<sessionId>.db` on disk.
         await Promise.race([client.closeSession(sessionId, request.signal), interrupted]);
         const resumedState = await Promise.race([
           client.resumeSession(
@@ -1180,7 +1177,6 @@ async function awaitTurnExecution(
               cwd,
               additionalDirectories,
               mcpServers,
-              ...(desiredSystemPrompt ? { systemPromptAppend: desiredSystemPrompt } : {}),
             },
             request.signal,
           ),
@@ -1188,7 +1184,6 @@ async function awaitTurnExecution(
         ]);
         hooks.onSessionState(resumedState);
         rememberOpenSession(hooks.openSessions, client, sessionId, {
-          systemPrompt: desiredSystemPrompt,
           mcpFingerprint,
         });
       }
@@ -1199,7 +1194,6 @@ async function awaitTurnExecution(
             cwd,
             additionalDirectories,
             mcpServers,
-            ...(desiredSystemPrompt ? { systemPromptAppend: desiredSystemPrompt } : {}),
           },
           request.signal,
         ),
@@ -1208,7 +1202,6 @@ async function awaitTurnExecution(
       sessionId = created.sessionId;
       hooks.onSessionState(created);
       rememberOpenSession(hooks.openSessions, client, sessionId, {
-        systemPrompt: desiredSystemPrompt,
         mcpFingerprint,
       });
     }
@@ -1248,12 +1241,9 @@ async function awaitTurnExecution(
     throw setupErr;
   }
 
-  const useNativeSystemPrompt = client.supportsSystemPromptAppend();
-
-  const promptText =
-    !useNativeSystemPrompt && request.systemPromptRelay
-      ? [request.systemPromptRelay, request.prompt].filter(Boolean).join("\n\n")
-      : request.prompt;
+  const promptText = request.systemPromptRelay
+    ? [request.systemPromptRelay, request.prompt].filter(Boolean).join("\n\n")
+    : request.prompt;
 
   const blocks: AcpPromptBlock[] = [];
   if (request.images?.length && client.supportsPromptImages()) {

@@ -506,7 +506,7 @@ function createFakeAcpSpawn(options?: {
   };
 }
 
-test("AgyAcpDriverSession streams thoughts/tools/text, delivers native systemPrompt + images, and switches model/effort/permissions with zero respawns", async () => {
+test("AgyAcpDriverSession streams thoughts/tools/text, keeps session/new free of harness systemPrompt.append, delivers native images, and switches model/effort/permissions with zero respawns", async () => {
   const fake = createFakeAcpSpawn({ requestPermissionOnPrompt: true });
   const driver = new AgyAcpDriverSession();
 
@@ -526,11 +526,15 @@ test("AgyAcpDriverSession streams thoughts/tools/text, delivers native systemPro
 
     assert.equal(turn1.status, "OK");
     assert.equal(turn1.conversationId, "acp-conv-1");
-    // Hallucinated `[]用户...` suffix must be stripped cleanly!
+    // Hallucinated `[]用户...` suffix must be stripped cleanly, and `session/new`
+    // must NOT inject Pi's harness systemPrompt into `_meta.antigravity.systemPrompt.append`
+    // (avoiding Cloud Code Assist `policy_guardian` false-429 retry loops).
     assert.equal(
       turn1.response,
-      "Reply[gemini-4-argon/high/default] sys=Follow Pi instructions v1",
+      "Reply[gemini-4-argon/high/default] sys=none",
     );
+    const newSessionRpc = fake.rpcLog.find((c) => c.method === "session/new")!;
+    assert.equal(newSessionRpc.params._meta, undefined);
     assert.deepEqual(activities1, [
       "thinking_delta",
       "tool_start",
@@ -646,12 +650,13 @@ test("AgyAcpDriverSession sends cooperative session/cancel on abort and keeps AC
   }
 });
 
-test("AntigravityRuntime with native ACP executor falls back to fresh session on missing session/resume and omits systemPromptRelay from user text", async () => {
+test("AntigravityRuntime with ACP executor falls back to fresh session on missing session/resume and relays system instructions in the opening prompt only", async () => {
   const fake = createFakeAcpSpawn({ missingSessionId: "missing-session-uuid" });
   const innerDriver = new AgyAcpDriverSession();
+  assert.equal(innerDriver.supportsNativeSystemPrompt, false);
   const testExecutor = {
-    supportsNativeSystemPrompt: true,
-    supportsNativeImages: true,
+    supportsNativeSystemPrompt: innerDriver.supportsNativeSystemPrompt,
+    supportsNativeImages: innerDriver.supportsNativeImages,
     run: (req: Parameters<typeof innerDriver.run>[0]) =>
       innerDriver.run({ ...req, spawnOverride: fake.spawnOverride }),
     snapshot: () => innerDriver.snapshot(),
@@ -697,16 +702,37 @@ test("AntigravityRuntime with native ACP executor falls back to fresh session on
     await runAntigravity(runtime, service.finishTurn);
 
     assert.ok(seenTypes.includes("conversation_fallback"));
-    assert.match(finalResponse, /sys=Native ACP system prompt/);
+    // `session/new` must not carry `_meta.antigravity.systemPrompt.append`.
+    assert.match(finalResponse, /sys=none/);
+    const newSessionCall = fake.rpcLog.find((c) => c.method === "session/new")!;
+    assert.equal(newSessionCall.params._meta, undefined);
 
-    // Verify user prompt sent on fresh fallback contained historyBootstrap + user prompt,
-    // NOT `## Current Pi instructions`!
-    const promptCall = fake.rpcLog.find((c) => c.method === "session/prompt")!;
-    const sentText = (promptCall.params.prompt as Array<{ type: string; text?: string }>)[0]?.text ?? "";
-    assert.ok(sentText.includes("<restored_context>prior turn</restored_context>"));
-    assert.ok(sentText.includes("Continue work"));
-    assert.ok(!sentText.includes("## Current Pi instructions"));
-    assert.ok(!sentText.includes("<session_instructions>"));
+    // Opening prompt carries `<session_instructions>` + historyBootstrap + user prompt.
+    const promptCall1 = fake.rpcLog.find((c) => c.method === "session/prompt")!;
+    const sentText1 = (promptCall1.params.prompt as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+    assert.ok(sentText1.includes("<session_instructions>"));
+    assert.ok(sentText1.includes("Native ACP system prompt"));
+    assert.ok(sentText1.includes("<restored_context>prior turn</restored_context>"));
+    assert.ok(sentText1.includes("Continue work"));
+
+    // Turn 2 on the same session with unchanged systemPrompt omits `<session_instructions>`.
+    const controller2 = await runAntigravity(
+      runtime,
+      service.beginStreamTurn({
+        prompt: "Follow-up turn",
+        systemPrompt: "Native ACP system prompt",
+        modelId: "gemini-4-argon",
+        effort: "medium",
+      }),
+    );
+    for (;;) {
+      const ev = await controller2.next();
+      if (!ev) break;
+    }
+    await runAntigravity(runtime, service.finishTurn);
+    const promptCalls = fake.rpcLog.filter((c) => c.method === "session/prompt");
+    assert.equal(promptCalls.length, 2);
+    assert.deepEqual(promptCalls[1]!.params.prompt, [{ type: "text", text: "Follow-up turn" }]);
   } finally {
     await runAntigravity(runtime, service.close);
   }
@@ -802,6 +828,24 @@ test("ACP helper unit checks: usage deduplication, bridged MCP step matching, pe
   if (bridgedActs[0]?.type === "tool_start") {
     assert.equal(bridgedActs[0].name, "mcp_pi-123_pi__read");
     assert.equal(isBridgedMcpStep(bridgedActs[0], "pi-123"), true);
+  }
+  // 4b. agy 1.5.8+ reports flat top-level `update.name` (without `_meta` or `mcpToolName`), even when `title` is freeform text.
+  const flatNameActs = norm.consumeUpdate({
+    sessionId: "s1",
+    update: {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-bridge-flat-1",
+      name: "mcp_pi-123_pi__read",
+      kind: "other",
+      title: "Read note.txt",
+      status: "in_progress",
+      rawInput: { path: "note.txt" },
+    },
+  });
+  assert.equal(flatNameActs[0]?.type, "tool_start");
+  if (flatNameActs[0]?.type === "tool_start") {
+    assert.equal(flatNameActs[0].name, "mcp_pi-123_pi__read");
+    assert.equal(isBridgedMcpStep(flatNameActs[0], "pi-123"), true);
   }
   assert.equal(isBridgedMcpStep({ name: "Run mcp_pi-123_pi__read", args: {} }, "pi-123"), true);
   assert.equal(isBridgedMcpStep({ name: "mcp_pi-123_pi__read", args: {} }, "pi-123"), true);

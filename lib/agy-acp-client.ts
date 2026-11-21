@@ -150,6 +150,7 @@ export interface AcpPermissionRequest {
   sessionId: string;
   toolCall?: {
     toolCallId?: string;
+    name?: string;
     title?: string;
     kind?: string;
     rawInput?: unknown;
@@ -923,7 +924,17 @@ function inferAcpToolName(
   rawArgs: JsonObject,
 ): string {
   const meta = asRecord(update._meta);
-  for (const candidate of [meta?.toolName, meta?.tool_name, meta?.name, update.toolName]) {
+  // Check explicit metadata first, then flat top-level `update.name` (reported by agy 1.5.8+
+  // for MCP tools like `mcp_<server>_pi__read` without `_meta` or `mcpToolName`).
+  for (const candidate of [
+    meta?.mcpToolName,
+    meta?.toolName,
+    meta?.tool_name,
+    meta?.name,
+    update.mcpToolName,
+    update.toolName,
+    update.name,
+  ]) {
     if (typeof candidate === "string" && candidate.trim()) {
       return candidate.trim();
     }
