@@ -10,6 +10,7 @@
 
 import { spawn } from "node:child_process";
 import { killAgyTree, trackAgyChild, untrackAgyChild } from "./agy-children.ts";
+import { formatAgyInstallHint } from "./agy-diagnostics.ts";
 import { getAgyBinary } from "./agy-diagnostics.ts";
 import type { AgyExecutionMode } from "./agy-profile.ts";
 import {
@@ -698,7 +699,7 @@ async function runSingleAgyTurn(request: AgyTurnRequest): Promise<AgyTurnOutcome
       finishLogical(() =>
         reject(
           new AgySpawnError(
-            `failed to start agy (${err.message}). Install agy 1.1.22+ or set AGY_BINARY.`,
+            `failed to start agy (${err.message}). ${formatAgyInstallHint()}`,
             stderrBuf,
           ),
         ),

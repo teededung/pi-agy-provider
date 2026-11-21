@@ -368,6 +368,15 @@ function selectAgyCandidate(successes: AgyBinarySuccess[]): AgyBinarySuccess | u
   return successes[0];
 }
 
+export const AGY_INSTALL_CMD_UNIX = "curl -fsSL https://antigravity.google/cli/install.sh | bash";
+export const AGY_INSTALL_CMD_WINDOWS = "irm https://antigravity.google/cli/install.ps1 | iex";
+export const AGY_DOWNLOAD_URL = "https://antigravity.google/download";
+
+export function formatAgyInstallHint(platform: NodeJS.Platform = process.platform): string {
+  const cmd = platform === "win32" ? AGY_INSTALL_CMD_WINDOWS : AGY_INSTALL_CMD_UNIX;
+  return `Install agy: \`${cmd}\` (or ${AGY_DOWNLOAD_URL}), or set AGY_BINARY.`;
+}
+
 export async function checkAgyBinary(options: CheckAgyBinaryOptions = {}): Promise<AgyBinaryCheck> {
   if (options.refresh) cachedSuccess = undefined;
   const resolved = await resolveAgyBinary(options);
@@ -380,7 +389,7 @@ export async function checkAgyBinary(options: CheckAgyBinaryOptions = {}): Promi
       category: "not-found",
       message: resolved.strict
         ? `antigravity: AGY_BINARY=${JSON.stringify(resolved.configured)} is not executable.`
-        : "antigravity: agy was not found on PATH or at ~/.gemini/bin/agy. Install agy 1.1.22+ or set AGY_BINARY.",
+        : `antigravity: agy was not found on PATH or at ~/.gemini/bin/agy. ${formatAgyInstallHint(options.platform)}`,
       stdout: "",
       stderr: "",
       candidates: [],

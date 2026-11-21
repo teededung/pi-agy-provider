@@ -19,7 +19,7 @@ import {
   renameAgyConversationsForSessionFile,
   sweepStalePiToolsConversations,
 } from "../lib/conversation-metadata.ts";
-import { RECOMMENDED_AGY_VERSION } from "../lib/agy-diagnostics.ts";
+import { checkAgyBinary, RECOMMENDED_AGY_VERSION } from "../lib/agy-diagnostics.ts";
 import { reduceAgyStream, stripHallucinatedTurnSuffix } from "../lib/reducer.ts";
 import {
   installModelSelectorSelectionPatch,
@@ -1085,6 +1085,40 @@ test("extractTrailingBridgeToolResults ignores all-aborted Esc placeholders from
   assert.equal(mixed.length, 2);
   assert.equal(mixed[0]?.content, "file contents");
   assert.equal(mixed[1]?.isError, true);
+});
+
+test("checkAgyBinary not-found diagnostic includes OS-specific agy CLI install command and download URL", async () => {
+  const missingWhich = async () => {
+    throw Object.assign(new Error("not found"), { code: "ENOENT" });
+  };
+  const missingStat = async () => {
+    throw Object.assign(new Error("not found"), { code: "ENOENT" });
+  };
+  const unixCheck = await checkAgyBinary({
+    refresh: true,
+    platform: "darwin",
+    homeDir: "/nonexistent-home-pi-agy-test",
+    env: { PATH: "" },
+    whichOverride: missingWhich,
+    statOverride: missingStat,
+  });
+  assert.equal(unixCheck.ok, false);
+  assert.equal(unixCheck.category, "not-found");
+  assert.match(unixCheck.message, /curl -fsSL https:\/\/antigravity\.google\/cli\/install\.sh \| bash/);
+  assert.match(unixCheck.message, /https:\/\/antigravity\.google\/download/);
+
+  const winCheck = await checkAgyBinary({
+    refresh: true,
+    platform: "win32",
+    homeDir: "C:\\nonexistent-home-pi-agy-test",
+    env: { PATH: "" },
+    whichOverride: missingWhich,
+    statOverride: missingStat,
+  });
+  assert.equal(winCheck.ok, false);
+  assert.equal(winCheck.category, "not-found");
+  assert.match(winCheck.message, /irm https:\/\/antigravity\.google\/cli\/install\.ps1 \| iex/);
+  assert.match(winCheck.message, /https:\/\/antigravity\.google\/download/);
 });
 
 test("renderFooterLines renders 2-row footer with agy 300k context bar and filters redundant agy-context status", () => {

@@ -51,7 +51,7 @@ import {
   rememberLegacyEffortSuffixModel,
   type AgyTurnRequest,
 } from "./agy-client.ts";
-import { AgyCompatibilityError, checkAgyBinary } from "./agy-diagnostics.ts";
+import { AgyCompatibilityError, checkAgyBinary, formatAgyInstallHint } from "./agy-diagnostics.ts";
 import {
   AgyDriverSession,
   type AgyDriverState,
@@ -627,7 +627,7 @@ export class AgyAcpDriverSession implements AgyTurnExecutor {
       const stderr = this.#stderrTail;
       this.#detachChild(child, "dead");
       const spawnErr = new AgySpawnError(
-        `failed to start agy acp (${err.message}). Install agy 1.5.0+ or set AGY_BINARY.`,
+        `failed to start agy acp (${err.message}). ${formatAgyInstallHint()}`,
         stderr,
       );
       client.failAll(spawnErr);

@@ -8,7 +8,11 @@ I use this extension daily on my own projects and refine it continuously around 
 
 ## Install
 
-Requires the official `agy` CLI on `PATH` (sign in inside `agy`, or run `/agy-login` in Pi).
+Requires the official `agy` CLI on `PATH` (sign in inside `agy`, or run `/agy-login` in Pi):
+
+- **macOS / Linux**: `curl -fsSL https://antigravity.google/cli/install.sh | bash`
+- **Windows (PowerShell)**: `irm https://antigravity.google/cli/install.ps1 | iex`
+- Or download directly from [antigravity.google/download](https://antigravity.google/download).
 
 ```bash
 pi install npm:pi-agy-provider
