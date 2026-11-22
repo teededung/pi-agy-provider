@@ -810,6 +810,23 @@ test("ACP helper unit checks: usage deduplication, bridged MCP step matching, pe
   assert.deepEqual(selectAcpPermissionOutcome(permReq, true), {
     outcome: { outcome: "selected", optionId: "deny" },
   });
+  // Read-only turns still approve `read` / `search` tool kinds while rejecting edits & shell.
+  assert.deepEqual(
+    selectAcpPermissionOutcome({ ...permReq, toolCall: { kind: "read", title: "Read file" } }, true),
+    { outcome: { outcome: "selected", optionId: "allow" } },
+  );
+  assert.deepEqual(
+    selectAcpPermissionOutcome({ ...permReq, toolCall: { kind: "search", title: "Search" } }, true),
+    { outcome: { outcome: "selected", optionId: "allow" } },
+  );
+  assert.deepEqual(
+    selectAcpPermissionOutcome({ ...permReq, toolCall: { kind: "edit", title: "Edit file" } }, true),
+    { outcome: { outcome: "selected", optionId: "deny" } },
+  );
+  assert.deepEqual(
+    selectAcpPermissionOutcome({ ...permReq, toolCall: { kind: "execute", title: "Run cmd" } }, true),
+    { outcome: { outcome: "selected", optionId: "deny" } },
+  );
 
   // 4. AcpTurnNormalizer + isBridgedMcpStep strip `agy acp`'s "Run " title prefix so bridged tools never emit duplicate cards
   const normOutcome = newTurnOutcome();

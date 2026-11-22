@@ -32,6 +32,10 @@ import { mapAgyToolToNative } from "../lib/native-tools.ts";
 import {
   createPiToolsAgent,
   EAGER_PI_BRIDGE_TOOLS_CONFIG,
+  ensureReadOnlyAgyAgent,
+  isSchemaReadOnlyAgyAgent,
+  PI_NO_TOOLS_AGENT_NAME,
+  PI_READ_ONLY_AGENT_NAME,
   PI_TOOLS_AGENT_NATIVE_TOOLS,
 } from "../lib/pi-tools-agent.ts";
 import {
@@ -3531,6 +3535,41 @@ test("agy 1.5.0 alignment: Retry-After backoff tracking, readOnlyPermissions arg
   });
   assert.ok(!readOnlyOneShotArgs.includes("--dangerously-skip-permissions"));
   assert.ok(readOnlyOneShotArgs.includes("--settings"));
+
+  // 2b. Schema-enforced read-only / zero-tool agents avoid `toolPermission: "strict"`
+  // (which soft-denies even ReadFile and cancels headless cascades in agy print mode).
+  assert.equal(isSchemaReadOnlyAgyAgent(PI_READ_ONLY_AGENT_NAME), true);
+  assert.equal(isSchemaReadOnlyAgyAgent(PI_NO_TOOLS_AGENT_NAME), true);
+  assert.equal(isSchemaReadOnlyAgyAgent("pi-tools-123"), false);
+  const schemaReadOnlyArgs = buildDriverAgyArgs({
+    model: "gemini-4-neon",
+    agent: PI_READ_ONLY_AGENT_NAME,
+    readOnlyPermissions: true,
+  });
+  assert.ok(schemaReadOnlyArgs.includes("--dangerously-skip-permissions"));
+  assert.ok(!schemaReadOnlyArgs.includes("--settings"));
+  assert.equal(schemaReadOnlyArgs[schemaReadOnlyArgs.indexOf("--agent") + 1], PI_READ_ONLY_AGENT_NAME);
+
+  const agentRoot = await mkdtemp(path.join(tmpdir(), "pi-agy-ro-agents-"));
+  try {
+    const roName = await ensureReadOnlyAgyAgent("readonly", agentRoot);
+    const ntName = await ensureReadOnlyAgyAgent("notools", agentRoot);
+    assert.equal(roName, PI_READ_ONLY_AGENT_NAME);
+    assert.equal(ntName, PI_NO_TOOLS_AGENT_NAME);
+    const roDoc = await readFile(path.join(agentRoot, PI_READ_ONLY_AGENT_NAME, "agent.md"), "utf8");
+    const ntDoc = await readFile(path.join(agentRoot, PI_NO_TOOLS_AGENT_NAME, "agent.md"), "utf8");
+    const roFrontmatter = JSON.parse(roDoc.split("---")[1]!) as { tools: string[] };
+    const ntFrontmatter = JSON.parse(ntDoc.split("---")[1]!) as { tools: string[] };
+    assert.ok(roFrontmatter.tools.includes("view_file"));
+    assert.ok(!roFrontmatter.tools.includes("run_command"));
+    assert.ok(!roFrontmatter.tools.includes("write_to_file"));
+    assert.ok(!roFrontmatter.tools.includes("edit_file"));
+    assert.deepEqual(ntFrontmatter.tools, []);
+    // Idempotent second call leaves file intact
+    assert.equal(await ensureReadOnlyAgyAgent("readonly", agentRoot), PI_READ_ONLY_AGENT_NAME);
+  } finally {
+    await rm(agentRoot, { recursive: true, force: true });
+  }
 
   // 3. Structured AGY_ERROR + print-timeout stderr extraction (exit code 3)
   const structuredStderr = [

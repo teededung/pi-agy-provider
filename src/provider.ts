@@ -50,6 +50,7 @@ import {
   type AgyModelInfo,
 } from "../lib/models.ts";
 import { readAgyProcessProfile, type AgyProcessProfile } from "../lib/agy-profile.ts";
+import { ensureReadOnlyAgyAgent } from "../lib/pi-tools-agent.ts";
 import type { AgyActivity, AgyUsage } from "../lib/reducer.ts";
 import type { AgyReplayStore } from "../lib/replay.ts";
 import { mapAgyToolToNative } from "../lib/native-tools.ts";
@@ -1022,7 +1023,7 @@ function buildSideConversationSystemPrompt(
   }
   const isReadOnlyAside = isReadOnlyAsideSystemPrompt(rawSystemPrompt);
   const asideInstruction = isReadOnlyAside
-    ? `${BTW_ASIDE_INSTRUCTION}\nThis is a read-only aside turn: do not modify files or run mutating commands.`
+    ? `${BTW_ASIDE_INSTRUCTION}\nThis is a read-only aside turn: use only read/search tools (such as read_file/view_file) and do not modify files or run shell commands.`
     : BTW_ASIDE_INSTRUCTION;
   const baseRelay = relayedSystemPrompt?.trim();
   if (baseRelay) {
@@ -1659,10 +1660,14 @@ export function streamAntigravity(
                 postBridgeSnapshot.conversationId ? undefined : turnPromptWithImages,
               )
             : turnPromptWithImages;
+        const summaryOnly = summaryRequest || sideSummaryRequest;
         const readOnlyPermissions =
-          summaryRequest ||
-          sideSummaryRequest ||
+          summaryOnly ||
           (sideRequest && isReadOnlyAsideSystemPrompt(systemPrompt));
+        const readOnlyAgent =
+          isolatedRequest && readOnlyPermissions && !processProfile.agent
+            ? await ensureReadOnlyAgyAgent(summaryOnly ? "notools" : "readonly")
+            : undefined;
 
         const acpImages =
           !summaryRequest && !sideSummaryRequest && executorMode === "acp"
@@ -1707,7 +1712,10 @@ export function streamAntigravity(
             // strip invoke_subagent/send_message/manage_subagents. Bypass custom agent
             // when Boost or Teamwork orchestration is active so subagent tools are available
             // alongside the Pi MCP bridge.
-            agent: isBoost || isTeamwork || isSwarm ? undefined : processProfile.agent,
+            agent:
+              isBoost || isTeamwork || isSwarm
+                ? undefined
+                : (readOnlyAgent ?? processProfile.agent),
             mode: processProfile.mode,
             readOnlyPermissions,
             mcpDirectory: processProfile.mcpDirectory,

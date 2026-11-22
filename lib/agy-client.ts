@@ -10,8 +10,8 @@
 
 import { spawn } from "node:child_process";
 import { killAgyTree, trackAgyChild, untrackAgyChild } from "./agy-children.ts";
-import { formatAgyInstallHint } from "./agy-diagnostics.ts";
-import { getAgyBinary } from "./agy-diagnostics.ts";
+import { formatAgyInstallHint, getAgyBinary } from "./agy-diagnostics.ts";
+import { isSchemaReadOnlyAgyAgent } from "./pi-tools-agent.ts";
 import type { AgyExecutionMode } from "./agy-profile.ts";
 import {
   detachAgyConversationBridgeMetadata,
@@ -353,11 +353,17 @@ export function extractAgyStderrSummary(stderr: string): string {
 }
 
 function permissionArgsForRequest(
-  request: Pick<AgyTurnRequest, "readOnlyPermissions">,
+  request: Pick<AgyTurnRequest, "readOnlyPermissions" | "agent">,
 ): string[] {
-  return request.readOnlyPermissions
-    ? ["--settings", READ_ONLY_AGY_SETTINGS_JSON]
-    : ["--dangerously-skip-permissions"];
+  // When a schema-enforced read-only / zero-tool agent (`pi-agy-readonly` or
+  // `pi-agy-notools`) is active, mutating & shell tools are absent from the
+  // model's tool list, so auto-approve read-only tools instead of passing
+  // `toolPermission: "strict"` (which soft-denies even `ReadFile` and cancels
+  // the cascade in headless `agy` print/stream-json mode).
+  if (request.readOnlyPermissions && !isSchemaReadOnlyAgyAgent(request.agent)) {
+    return ["--settings", READ_ONLY_AGY_SETTINGS_JSON];
+  }
+  return ["--dangerously-skip-permissions"];
 }
 
 export function buildOneShotAgyArgs(request: AgyTurnRequest): string[] {

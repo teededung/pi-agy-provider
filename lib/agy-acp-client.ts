@@ -422,7 +422,8 @@ export function buildAcpChildEnvironment(
 
 /**
  * Choose the ACP permission callback outcome for a turn.
- * - `readOnlyPermissions === true`: select `reject_once` if offered, else `cancelled`.
+ * - `readOnlyPermissions === true`: allow read-only (`read` / `search`) tools
+ *   and reject all mutating, shell, or unspecified tool kinds (`reject_once` / `cancelled`).
  * - Normal headless turn: select `allow_once` (or `allow_always`) if offered, else `cancelled`.
  */
 export function selectAcpPermissionOutcome(
@@ -430,7 +431,9 @@ export function selectAcpPermissionOutcome(
   readOnlyPermissions = false,
 ): AcpPermissionResponse {
   const options = Array.isArray(request.options) ? request.options : [];
-  if (readOnlyPermissions) {
+  const kind = request.toolCall?.kind;
+  const isReadOnlyTool = kind === "read" || kind === "search";
+  if (readOnlyPermissions && !isReadOnlyTool) {
     const rejectOpt =
       options.find((opt) => opt.kind === "reject_once") ??
       options.find((opt) => opt.kind === "reject_always");
