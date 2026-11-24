@@ -919,6 +919,7 @@ const KNOWN_AGY_TOOLS = new Set([
   "swarm_wait",
   "manage_task",
   "run_workflow",
+  "update_steps",
   "call_mcp_tool",
 ]);
 

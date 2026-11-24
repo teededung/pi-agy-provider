@@ -235,7 +235,7 @@ export function pricingForModel(modelId: string): ModelPricing {
   if (/^gemini-4-hydrogen$/i.test(baseId)) {
     return { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 };
   }
-  if (/^gemini-4-(?:argon|carbon)$/i.test(baseId)) {
+  if (/^gemini-4-(?:argon|carbon|neon)$|^gemini-pro-orchestrator(?:$|[-@])/i.test(baseId)) {
     return { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 };
   }
   if (/^gemini-3\.(?:8|7|6)-flash$/i.test(baseId)) {

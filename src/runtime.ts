@@ -13,7 +13,7 @@ import { Context, Data, Effect, Layer, ManagedRuntime, Exit, Cause, Result } fro
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AcpAuthMethod } from "../lib/agy-acp-client.ts";
+import { AgyAcpRpcError, type AcpAuthMethod } from "../lib/agy-acp-client.ts";
 import {
   AgySpawnError,
   AgyStallError,
@@ -137,7 +137,11 @@ export function computeStallRetryBackoffMs(baseMs: number, retry: number): numbe
   return Math.min(MAX_STALL_RETRY_BACKOFF_MS, Math.round(baseMs * 2 ** exp));
 }
 
-function isMissingConversationFailure(value: unknown): boolean {
+export function isMissingConversationFailure(value: unknown): boolean {
+  // agy 1.5.15+ returns standard JSON-RPC -32002 (Resource Not Found) on missing ACP sessions.
+  if (value instanceof AgyAcpRpcError && value.code === -32002) {
+    return true;
+  }
   const text =
     value instanceof AgySpawnError
       ? `${value.message}\n${value.stderr}`

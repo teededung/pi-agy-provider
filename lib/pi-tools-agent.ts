@@ -40,6 +40,17 @@ export const PI_TOOLS_AGENT_NATIVE_TOOLS = [
   "read_url_content",
 ] as const;
 
+/**
+ * Native tools declared on the `pi-tools-*` custom agent. `update_steps` is
+ * gated on `agy >= 1.5.16` because older binaries reject unknown tool names
+ * when constructing a custom-agent executor.
+ */
+export function piToolsAgentNativeTools(includeUpdateSteps = false): string[] {
+  return includeUpdateSteps
+    ? [...PI_TOOLS_AGENT_NATIVE_TOOLS, "update_steps"]
+    : [...PI_TOOLS_AGENT_NATIVE_TOOLS];
+}
+
 export const EAGER_PI_BRIDGE_TOOLS_CONFIG: Record<string, { eager: true }> = Object.fromEntries(
   EAGER_PI_BRIDGE_TOOLS.map((toolName) => [toolName, { eager: true as const }]),
 );
@@ -61,7 +72,10 @@ export function createPiToolsAgent(
   return {
     name,
     isPrepared: () => prepared,
-    async prepare(bridge: PiToolsAgentBridge): Promise<void> {
+    async prepare(
+      bridge: PiToolsAgentBridge,
+      options?: { includeUpdateSteps?: boolean },
+    ): Promise<void> {
       prepared = false;
       const definition = {
         name,
@@ -69,7 +83,7 @@ export function createPiToolsAgent(
         mainAgent: true,
         subagent: false,
         inheritCustomizations: false,
-        tools: [...PI_TOOLS_AGENT_NATIVE_TOOLS],
+        tools: piToolsAgentNativeTools(options?.includeUpdateSteps),
         mcpServers: [
           {
             name: bridge.serverName,

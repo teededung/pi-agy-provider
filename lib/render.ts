@@ -312,6 +312,23 @@ export function formatAgyCall(
       ].filter(Boolean);
       return parts.length > 0 ? `${label} ${parts.join(" ")}` : label;
     }
+    case "update_steps": {
+      const steps = parseAgyStepsArg(args);
+      if (!steps || steps.length === 0) return label;
+      const doneCount = steps.filter((s) => s.status === "done").length;
+      const active = steps.find((s) => s.status === "in_progress");
+      const failedCount = steps.filter((s) => s.status === "failed").length;
+      const summary = theme.fg("muted", `${doneCount}/${steps.length} done`);
+      const failPart = failedCount > 0 ? theme.fg("error", ` · ${failedCount} failed`) : "";
+      const activeTitle =
+        active && active.title.length > 60 ? `${active.title.slice(0, 59)}…` : active?.title;
+      const activePart = activeTitle
+        ? ` ${theme.fg("accent", `▸ ${activeTitle}`)}`
+        : doneCount === steps.length
+          ? ` ${theme.fg("success", "✓ complete")}`
+          : "";
+      return `${label} ${summary}${failPart}${activePart}`;
+    }
       default: {
         const generic = formatGenericArgs(args, theme);
         return generic ? `${label} ${generic}` : label;
@@ -319,6 +336,99 @@ export function formatAgyCall(
     }
   })();
   return `${prefix}${body}`;
+}
+
+export type AgyStepStatus = "pending" | "in_progress" | "done" | "skipped" | "failed";
+
+export interface AgyStepItem {
+  title: string;
+  status: AgyStepStatus;
+}
+
+const VALID_STEP_STATUSES = new Set<AgyStepStatus>([
+  "pending",
+  "in_progress",
+  "done",
+  "skipped",
+  "failed",
+]);
+
+/** Parse `update_steps({ steps: [{ title, status }] })` arguments safely. */
+export function parseAgyStepsArg(input: unknown): AgyStepItem[] | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const rawSteps = (input as { steps?: unknown }).steps;
+  if (!Array.isArray(rawSteps)) return undefined;
+  const parsed: AgyStepItem[] = [];
+  for (const item of rawSteps) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as { title?: unknown; status?: unknown };
+    const title = typeof rec.title === "string" ? rec.title.replace(/\s+/g, " ").trim() : "";
+    const status =
+      typeof rec.status === "string" && VALID_STEP_STATUSES.has(rec.status as AgyStepStatus)
+        ? (rec.status as AgyStepStatus)
+        : undefined;
+    if (title && status) parsed.push({ title, status });
+  }
+  return parsed;
+}
+
+export function hasOpenAgySteps(steps: readonly AgyStepItem[]): boolean {
+  return steps.some((s) => s.status === "pending" || s.status === "in_progress");
+}
+
+/**
+ * Format a compact live step checklist (matching `agy 1.5.16`'s `update_steps`
+ * checklist: up to 7 visible steps with `⋮ N earlier` / `⋮ N more` indicators,
+ * auto-hiding once every step is finished).
+ */
+export function formatAgyStepsChecklistLines(
+  steps: readonly AgyStepItem[],
+  theme: Theme,
+  maxVisible = 7,
+): string[] {
+  if (steps.length === 0 || !hasOpenAgySteps(steps)) return [];
+  const doneCount = steps.filter((s) => s.status === "done").length;
+  const skippedCount = steps.filter((s) => s.status === "skipped").length;
+  const failedCount = steps.filter((s) => s.status === "failed").length;
+  const extras: string[] = [];
+  if (skippedCount > 0) extras.push(`${skippedCount} skipped`);
+  if (failedCount > 0) extras.push(theme.fg("error", `${failedCount} failed`));
+  const header =
+    theme.fg("accent", "◆ ") +
+    theme.bold(theme.fg("text", `${doneCount}/${steps.length} steps`)) +
+    (extras.length > 0 ? theme.fg("dim", ` (${extras.join(", ")})`) : "");
+
+  const limit = Math.max(1, maxVisible);
+  let start = 0;
+  if (steps.length > limit) {
+    const focusIdx = steps.findIndex((s) => s.status === "in_progress");
+    const anchor = focusIdx >= 0 ? focusIdx : steps.findIndex((s) => s.status === "pending");
+    const target = anchor >= 0 ? anchor : 0;
+    start = Math.max(0, Math.min(target - Math.floor(limit / 2), steps.length - limit));
+  }
+  const end = Math.min(steps.length, start + limit);
+  const lines: string[] = [header];
+  if (start > 0) {
+    lines.push(theme.fg("dim", `  ⋮ ${start} earlier`));
+  }
+  for (let i = start; i < end; i++) {
+    const step = steps[i]!;
+    if (step.status === "done") {
+      lines.push(`  ${theme.fg("success", "✓")} ${theme.fg("muted", step.title)}`);
+    } else if (step.status === "in_progress") {
+      lines.push(`  ${theme.fg("accent", "▸")} ${theme.bold(theme.fg("text", step.title))}`);
+    } else if (step.status === "failed") {
+      lines.push(`  ${theme.fg("error", "✗")} ${theme.fg("error", step.title)}`);
+    } else if (step.status === "skipped") {
+      lines.push(`  ${theme.fg("dim", "−")} ${theme.fg("dim", step.title)}`);
+    } else {
+      lines.push(`  ${theme.fg("dim", "○")} ${theme.fg("dim", step.title)}`);
+    }
+  }
+  if (end < steps.length) {
+    lines.push(theme.fg("dim", `  ⋮ ${steps.length - end} more`));
+  }
+  return lines;
 }
 
 export interface AgyResultSummary {

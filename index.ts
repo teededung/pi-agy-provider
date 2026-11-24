@@ -69,6 +69,7 @@ import {
   MIN_AGY_VERSION,
   RECOMMENDED_AGY_VERSION,
   runAgyCommand,
+  supportsAgyUpdateSteps,
 } from "./lib/agy-diagnostics.ts";
 import {
   normalizeAgyDriverMode,
@@ -208,7 +209,16 @@ import {
   readAgySwarmSnapshot,
   type AgySwarmSnapshot,
 } from "./lib/swarm.ts";
-import { agyToolLabel, cleanToolOutputLines, formatAgyCall, summarizeAgyResult } from "./lib/render.ts";
+import {
+  agyToolLabel,
+  cleanToolOutputLines,
+  formatAgyCall,
+  formatAgyStepsChecklistLines,
+  hasOpenAgySteps,
+  parseAgyStepsArg,
+  summarizeAgyResult,
+  type AgyStepItem,
+} from "./lib/render.ts";
 import {
   AGY_TOOL_SUMMARIES_ENTRY,
   ToolSummaryTracker,
@@ -1199,7 +1209,14 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       if (!registered || !url) {
         throw new Error("antigravity: Pi tool mode requires a registered Pi-tool bridge.");
       }
-      await piToolsAgent.prepare({ serverName: bridge.serverName, url, token: bridgeToken });
+      const binaryCheck = await checkAgyBinary().catch(() => undefined);
+      const includeUpdateSteps = Boolean(
+        binaryCheck?.ok && supportsAgyUpdateSteps(binaryCheck.version),
+      );
+      await piToolsAgent.prepare(
+        { serverName: bridge.serverName, url, token: bridgeToken },
+        { includeUpdateSteps },
+      );
     }
   }
 
@@ -1331,11 +1348,13 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
   let widgetLiveCount = -1;
   let widgetArtifactCount = -1;
   let latestSwarmSnapshot: AgySwarmSnapshot | undefined;
+  let liveSteps: AgyStepItem[] = [];
   let lastRenderedLive = -1;
   let lastRenderedArtifacts = -1;
   let lastRenderedSubagents = -1;
   let lastRenderedSubagentSummary = "";
   let lastRenderedSwarmKey = "";
+  let lastRenderedStepsKey = "";
   let widgetScanInFlight = false;
   let widgetScanQueued = false;
   let agyAgentActive = false;
@@ -1427,6 +1446,8 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     const swarmKey = swarm
       ? `${swarm.swarmId}:${swarm.title}:${swarm.headSeq}:${swarm.workingCount}:${swarm.waitingCount}:${swarm.done}:${swarm.newestUpdateMs}`
       : "";
+    const openSteps = hasOpenAgySteps(liveSteps) ? liveSteps : [];
+    const stepsKey = openSteps.map((s) => `${s.status}:${s.title}`).join("|");
 
     if (
       !force &&
@@ -1434,7 +1455,8 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       artifacts === lastRenderedArtifacts &&
       subagents === lastRenderedSubagents &&
       subagentSummary === lastRenderedSubagentSummary &&
-      swarmKey === lastRenderedSwarmKey
+      swarmKey === lastRenderedSwarmKey &&
+      stepsKey === lastRenderedStepsKey
     ) {
       return;
     }
@@ -1443,12 +1465,19 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     lastRenderedSubagents = subagents;
     lastRenderedSubagentSummary = subagentSummary;
     lastRenderedSwarmKey = swarmKey;
+    lastRenderedStepsKey = stepsKey;
 
     try {
       tasksUi.setWidget(AGY_TASKS_WIDGET_KEY, undefined);
       tasksUi.setWidget(AGY_ARTIFACTS_WIDGET_KEY, undefined);
 
-      if (liveTasks === 0 && artifacts === 0 && subagents === 0 && !swarm) {
+      if (
+        liveTasks === 0 &&
+        artifacts === 0 &&
+        subagents === 0 &&
+        !swarm &&
+        openSteps.length === 0
+      ) {
         tasksUi.setWidget(AGY_STATUS_WIDGET_KEY, undefined);
         return;
       }
@@ -1458,6 +1487,9 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
         const regions: { x: number; y: number; width: number; command: string }[] = [];
         const widget = {
           render: (width: number) => {
+            const stepLines = formatAgyStepsChecklistLines(openSteps, theme).map((line) =>
+              truncateToWidth(line, width, ""),
+            );
             const previewLines = formatAgySubagentsLivePreviewLines(
               subagentRoster,
               now,
@@ -1499,7 +1531,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
               );
             }
             const hintLines = packHintItems(items, width, theme);
-            const lines = [...previewLines, ...hintLines];
+            const lines = [...stepLines, ...previewLines, ...hintLines];
             regions.length = 0;
             lines.forEach((line, y) => {
               const plain = stripTerminalSequences(line);
@@ -1869,6 +1901,16 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       }
       renderAgyStatusWidget();
       updateAgyTasksWidget();
+    }
+    if (
+      (activity.type === "tool_start" || activity.type === "tool_done") &&
+      activity.name === "update_steps"
+    ) {
+      const parsedSteps = parseAgyStepsArg(activity.args);
+      if (parsedSteps) {
+        liveSteps = hasOpenAgySteps(parsedSteps) ? parsedSteps : [];
+        renderAgyStatusWidget();
+      }
     }
     if (activity.type === "usage") {
       const nextContextTokens = agyContextTokens(activity.usage);
@@ -2446,7 +2488,9 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     oneShotGrill = false;
     oneShotSwarm = false;
     latestSwarmSnapshot = undefined;
+    liveSteps = [];
     lastRenderedSwarmKey = "";
+    lastRenderedStepsKey = "";
     lastSwarmWakeSeqBySwarm.clear();
     teamworkLaunchedThisTurn = false;
     persistedGoalKey = undefined;
@@ -2802,10 +2846,12 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     widgetLiveCount = -1;
     widgetArtifactCount = -1;
     latestSwarmSnapshot = undefined;
+    liveSteps = [];
     lastRenderedLive = -1;
     lastRenderedArtifacts = -1;
     lastRenderedSubagents = -1;
     lastRenderedSwarmKey = "";
+    lastRenderedStepsKey = "";
     subagentRoster.clear();
     widgetScanInFlight = false;
     try {
@@ -3217,6 +3263,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       persistGoalState(ctx);
       updateOrchestrationStatus(ctx.ui);
       subagentRoster.clear();
+      liveSteps = [];
       setAgyTasksWidget(0);
       setAgyArtifactsWidget(0);
       renderAgyStatusWidget(true);
@@ -3245,6 +3292,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       persistedGoalKey = undefined;
       updateOrchestrationStatus(ctx.ui);
       subagentRoster.clear();
+      liveSteps = [];
       setAgyTasksWidget(0);
       setAgyArtifactsWidget(0);
       renderAgyStatusWidget(true);

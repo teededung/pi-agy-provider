@@ -8,10 +8,14 @@ import which from "which";
 import { killAgyTree, trackAgyChild, untrackAgyChild } from "./agy-children.ts";
 
 export const MIN_AGY_VERSION = "1.1.22";
-/** Soft target: includes ACP session/cancel fixes (1.5.4+), 1.5.8–1.5.10 ACP/10m-stream/4m-retry fixes, and 1.5.11–1.5.12 Gemini 4 Neon + connection-reset retry fixes. */
-export const RECOMMENDED_AGY_VERSION = "1.5.12";
+/** Soft target: includes ACP session/cancel, subagent approval, -32002 missing-session, and swarm/quota fixes through agy 1.5.16. */
+export const RECOMMENDED_AGY_VERSION = "1.5.16";
+export const AGY_UPDATE_STEPS_MIN_VERSION = "1.5.16";
 export function isBelowRecommendedAgy(version: string | undefined): boolean {
   return Boolean(version && valid(version) && !gte(version, RECOMMENDED_AGY_VERSION));
+}
+export function supportsAgyUpdateSteps(version: string | undefined): boolean {
+  return Boolean(version && valid(version) && gte(version, AGY_UPDATE_STEPS_MIN_VERSION));
 }
 export const AGY_VERSION_TIMEOUT_MS = 5_000;
 const DIAGNOSTIC_LIMIT = 8_192;

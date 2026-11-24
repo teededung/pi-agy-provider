@@ -19,7 +19,11 @@ import {
   renameAgyConversationsForSessionFile,
   sweepStalePiToolsConversations,
 } from "../lib/conversation-metadata.ts";
-import { checkAgyBinary, RECOMMENDED_AGY_VERSION } from "../lib/agy-diagnostics.ts";
+import {
+  checkAgyBinary,
+  RECOMMENDED_AGY_VERSION,
+  supportsAgyUpdateSteps,
+} from "../lib/agy-diagnostics.ts";
 import { reduceAgyStream, stripHallucinatedTurnSuffix } from "../lib/reducer.ts";
 import {
   installModelSelectorSelectionPatch,
@@ -37,18 +41,26 @@ import {
   PI_NO_TOOLS_AGENT_NAME,
   PI_READ_ONLY_AGENT_NAME,
   PI_TOOLS_AGENT_NATIVE_TOOLS,
+  piToolsAgentNativeTools,
 } from "../lib/pi-tools-agent.ts";
 import {
   AGY_CLAUDE_CONTEXT_LIMIT,
   AGY_EFFECTIVE_CONTEXT_LIMIT,
   AGY_GEMINI4_CONTEXT_LIMIT,
   computeSessionUsageSnapshot,
+  parseAgyAutoCompactOverride,
   renderFooterLines,
   resolveAgyBranchContextTokens,
   resolveAgyEffectiveContextLimit,
   resolveBranchContextFootprint,
 } from "../lib/footer.ts";
-import { formatAgyCall } from "../lib/render.ts";
+import {
+  formatAgyCall,
+  formatAgyStepsChecklistLines,
+  parseAgyStepsArg,
+} from "../lib/render.ts";
+import { AgyAcpRpcError } from "../lib/agy-acp-client.ts";
+import { isMissingConversationFailure } from "../src/runtime.ts";
 import {
   formatAgySubagentsLivePreviewLines,
   readAgySubagentProgressLog,
@@ -179,6 +191,10 @@ test("Pi tool agent scopes MCP to its bridge and removes only its own configurat
   assert.equal(agentMarkdown.includes("read_file"), true);
   assert.equal(agentMarkdown.includes("view_file"), true);
   assert.deepEqual(definition.tools, [...PI_TOOLS_AGENT_NATIVE_TOOLS]);
+  await agent.prepare(bridge, { includeUpdateSteps: true });
+  const upgradedDef = JSON.parse((await readFile(agentFile, "utf8")).split("---\n")[1]);
+  assert.deepEqual(upgradedDef.tools, [...PI_TOOLS_AGENT_NATIVE_TOOLS, "update_steps"]);
+  await agent.prepare(bridge);
   assert.equal(EAGER_PI_BRIDGE_TOOLS_CONFIG.pi__web_search?.eager, true);
   assert.equal(EAGER_PI_BRIDGE_TOOLS_CONFIG.pi__fetch_content?.eager, true);
   assert.equal(EAGER_PI_BRIDGE_TOOLS_CONFIG.pi__grep?.eager, true);
@@ -1125,6 +1141,97 @@ test("checkAgyBinary not-found diagnostic includes OS-specific agy CLI install c
   assert.match(winCheck.message, /https:\/\/antigravity\.google\/download/);
 });
 
+test("agy 1.5.15–1.5.16 alignment: AGY_CLI_AUTO_COMPACT_OVERRIDE, ACP -32002, Neon/Orchestrator limits & pricing, and update_steps checklist", () => {
+  // 1. AGY_CLI_AUTO_COMPACT_OVERRIDE parsing (absolute, K/M shorthand, % of context window)
+  assert.equal(parseAgyAutoCompactOverride("700000", 1_000_000), 700_000);
+  assert.equal(parseAgyAutoCompactOverride("800K", 1_000_000), 800_000);
+  assert.equal(parseAgyAutoCompactOverride("0.5M", 1_000_000), 500_000);
+  assert.equal(parseAgyAutoCompactOverride("80%", 1_000_000), 800_000);
+  assert.equal(parseAgyAutoCompactOverride("2M", 1_000_000), 1_000_000);
+  assert.equal(parseAgyAutoCompactOverride("120%", 1_000_000), undefined);
+  assert.equal(parseAgyAutoCompactOverride("invalid", 1_000_000), undefined);
+
+  assert.equal(resolveAgyEffectiveContextLimit("gemini-pro-orchestrator-neon", {}), 512_000);
+  assert.equal(
+    resolveAgyEffectiveContextLimit("gemini-4-neon", { AGY_CLI_AUTO_COMPACT_OVERRIDE: "800K" }),
+    800_000,
+  );
+  assert.equal(
+    resolveAgyEffectiveContextLimit("gemini-4-neon", { AGY_CLI_AUTO_COMPACT_OVERRIDE: "75%" }),
+    750_000,
+  );
+
+  // 2. ACP -32002 missing-session error code detection regardless of message wording
+  assert.equal(
+    isMissingConversationFailure(new AgyAcpRpcError("session/resume", -32002, "Resource not found")),
+    true,
+  );
+  assert.equal(
+    isMissingConversationFailure(new AgyAcpRpcError("session/prompt", -32603, "Internal error")),
+    false,
+  );
+
+  // 3. Gemini 4 Neon & Orchestrator pricing
+  assert.deepEqual(pricingForModel("gemini-4-neon"), {
+    input: 2,
+    output: 10,
+    cacheRead: 0.1,
+    cacheWrite: 0,
+  });
+  assert.deepEqual(pricingForModel("gemini-pro-orchestrator-neon"), {
+    input: 2,
+    output: 10,
+    cacheRead: 0.1,
+    cacheWrite: 0,
+  });
+
+  // 4. update_steps card formatting + live 7-step windowed checklist that auto-hides when done
+  const plainTheme = {
+    fg: (_c: string, t: string) => t,
+    bold: (t: string) => t,
+  };
+  const steps = parseAgyStepsArg({
+    steps: [
+      { title: "Step 1", status: "done" },
+      { title: "Step 2", status: "done" },
+      { title: "Step 3", status: "done" },
+      { title: "Step 4", status: "done" },
+      { title: "Step 5", status: "in_progress" },
+      { title: "Step 6", status: "pending" },
+      { title: "Step 7", status: "pending" },
+      { title: "Step 8", status: "pending" },
+      { title: "Step 9", status: "pending" },
+    ],
+  });
+  assert.ok(steps && steps.length === 9);
+  const callCard = formatAgyCall("update_steps", { steps }, plainTheme);
+  assert.match(callCard, /update_steps 4\/9 done ▸ Step 5/);
+
+  const checklist = formatAgyStepsChecklistLines(steps!, plainTheme, 7);
+  assert.equal(checklist[0], "◆ 4/9 steps");
+  assert.ok(checklist.some((l) => l.includes("⋮ 1 earlier")));
+  assert.ok(checklist.some((l) => l.includes("▸ Step 5")));
+  assert.ok(checklist.some((l) => l.includes("⋮ 1 more")));
+
+  // Auto-hides once all steps are done/skipped/failed
+  const finishedChecklist = formatAgyStepsChecklistLines(
+    [
+      { title: "Step 1", status: "done" },
+      { title: "Step 2", status: "skipped" },
+    ],
+    plainTheme,
+  );
+  assert.deepEqual(finishedChecklist, []);
+
+  // 5. Version-gated update_steps enablement on pi-tools custom agent (agy >= 1.5.16 only)
+  assert.equal(supportsAgyUpdateSteps(undefined), false);
+  assert.equal(supportsAgyUpdateSteps("1.5.15"), false);
+  assert.equal(supportsAgyUpdateSteps("1.5.16"), true);
+  assert.equal(supportsAgyUpdateSteps("1.6.0"), true);
+  assert.equal(piToolsAgentNativeTools(false).includes("update_steps"), false);
+  assert.equal(piToolsAgentNativeTools(true).includes("update_steps"), true);
+});
+
 test("renderFooterLines renders 2-row footer with agy 300k context bar and filters redundant agy-context status", () => {
   const plainTheme = {
     fg: (_color: string, text: string) => text,
@@ -1607,8 +1714,8 @@ test("deleteDisposableAgyConversation recursively deletes subagent trees and cle
   }
 });
 
-test("reduceAgyStream strips invisible U+FFF9-U+FFFB chars without truncating subsequent deltas and RECOMMENDED_AGY_VERSION is 1.5.12", () => {
-  assert.equal(RECOMMENDED_AGY_VERSION, "1.5.12");
+test("reduceAgyStream strips invisible U+FFF9-U+FFFB chars without truncating subsequent deltas and RECOMMENDED_AGY_VERSION is 1.5.16", () => {
+  assert.equal(RECOMMENDED_AGY_VERSION, "1.5.16");
   assert.equal(stripHallucinatedTurnSuffix("hello \uFFF9code\uFFFA\uFFFB world"), "hello code world");
 
   const stream = [

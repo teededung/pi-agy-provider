@@ -19,19 +19,59 @@ export const FOOTER_BRANCH_MAX_WIDTH = 28;
 export const FOOTER_SESSION_NAME_MAX_WIDTH = 28;
 
 const AGY_1M_CLAUDE_MODEL_RE = /^claude-(?:opus|sonnet)-(?:4-6|4-8|5-5)(?:$|[-@])/i;
-const AGY_GEMINI4_MODEL_RE = /^gemini-4(?:$|[-@.])/i;
+const AGY_GEMINI4_MODEL_RE = /^gemini-(?:4|pro-orchestrator)(?:$|[-@.])/i;
+const AUTO_COMPACT_OVERRIDE_RE = /^(\d+(?:\.\d+)?)\s*(%|k|m)?$/i;
 
-export function resolveAgyEffectiveContextLimit(modelId?: string): number {
+/**
+ * Parse `AGY_CLI_AUTO_COMPACT_OVERRIDE` (`agy 1.5.15+`): accepts an integer
+ * token count (`700000`), a `K`/`M` shorthand (`800K`, `0.5M`), or a percentage
+ * (`80%`) of the model's context window, clamped to `[1_000, maxWindow]`.
+ */
+export function parseAgyAutoCompactOverride(
+  raw: string | undefined,
+  maxWindow: number,
+): number | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const match = AUTO_COMPACT_OVERRIDE_RE.exec(trimmed);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  const unit = match[2]?.toLowerCase();
+  let tokens: number;
+  if (unit === "%") {
+    if (value > 100) return undefined;
+    tokens = Math.round(maxWindow * (value / 100));
+  } else if (unit === "k") {
+    tokens = Math.round(value * 1_000);
+  } else if (unit === "m") {
+    tokens = Math.round(value * 1_000_000);
+  } else {
+    tokens = Math.round(value);
+  }
+  if (!Number.isFinite(tokens) || tokens < 1_000) return undefined;
+  return Math.min(tokens, maxWindow);
+}
+
+export function resolveAgyEffectiveContextLimit(
+  modelId?: string,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  let defaultLimit = AGY_EFFECTIVE_CONTEXT_LIMIT;
+  let maxWindow = AGY_EFFECTIVE_CONTEXT_LIMIT;
   if (typeof modelId === "string") {
     const trimmed = modelId.trim();
     if (AGY_1M_CLAUDE_MODEL_RE.test(trimmed)) {
-      return AGY_CLAUDE_CONTEXT_LIMIT;
-    }
-    if (AGY_GEMINI4_MODEL_RE.test(trimmed)) {
-      return AGY_GEMINI4_CONTEXT_LIMIT;
+      defaultLimit = AGY_CLAUDE_CONTEXT_LIMIT;
+      maxWindow = AGY_CLAUDE_CONTEXT_LIMIT;
+    } else if (AGY_GEMINI4_MODEL_RE.test(trimmed)) {
+      defaultLimit = AGY_GEMINI4_CONTEXT_LIMIT;
+      maxWindow = AGY_CLAUDE_CONTEXT_LIMIT;
     }
   }
-  return AGY_EFFECTIVE_CONTEXT_LIMIT;
+  const override = parseAgyAutoCompactOverride(env.AGY_CLI_AUTO_COMPACT_OVERRIDE, maxWindow);
+  return override ?? defaultLimit;
 }
 
 export type AgyFooterMode = "on" | "off";
