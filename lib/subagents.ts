@@ -686,9 +686,14 @@ export async function syncAgySubagentRoster(
         const mtimeMs = stat.birthtimeMs || stat.mtimeMs || Date.now();
         diskStates.set(cid, { state, role, typeName, mtimeMs, spawnStepIndex });
 
+        const canMatchCid = (candidate: AgySubagentEntry | undefined) =>
+          candidate &&
+          (!candidate.conversationId || candidate.conversationId.toLowerCase() === cid.toLowerCase())
+            ? candidate
+            : undefined;
         let entry = findByName(roster, cid);
-        if (!entry && role) entry = findByName(roster, role);
-        if (!entry && typeName) entry = findByName(roster, typeName);
+        if (!entry && role) entry = canMatchCid(findByName(roster, role));
+        if (!entry && typeName) entry = canMatchCid(findByName(roster, typeName));
         if (entry) {
           if (!entry.conversationId) {
             entry.conversationId = cid;
@@ -704,10 +709,9 @@ export async function syncAgySubagentRoster(
           }
         } else {
           const name = role ?? typeName ?? "subagent";
-          const key = agyToolStepKey({
-            stepId: spawnStepIndex,
-            name: `invoke_subagent:${name}`,
-          });
+          // Batch spawns (e.g. `swarm add` with `tasks`/`n`) share one `spawnStepIndex`,
+          // so disk-discovered subagents must key by conversationId to avoid overwriting siblings.
+          const key = `cid:${cid.toLowerCase()}`;
           roster.set(key, {
             key,
             name,
@@ -944,6 +948,19 @@ export async function syncAgySubagentRoster(
   return changed;
 }
 
+function indexSwarmMembers(swarm: AgySwarmSnapshot): {
+  byCid: Map<string, AgySwarmMember>;
+  byName: Map<string, AgySwarmMember>;
+} {
+  const byCid = new Map<string, AgySwarmMember>();
+  const byName = new Map<string, AgySwarmMember>();
+  for (const member of swarm.members) {
+    if (member.conversationId) byCid.set(member.conversationId.toLowerCase(), member);
+    byName.set(member.name.toLowerCase(), member);
+  }
+  return { byCid, byName };
+}
+
 function matchSwarmMemberForSubagent(
   byCid: ReadonlyMap<string, AgySwarmMember>,
   byName: ReadonlyMap<string, AgySwarmMember>,
@@ -1008,12 +1025,7 @@ export function reconcileAgySubagentRosterWithSwarm(
   swarm: AgySwarmSnapshot | undefined,
 ): boolean {
   if (!swarm || roster.size === 0) return false;
-  const byCid = new Map<string, AgySwarmMember>();
-  const byName = new Map<string, AgySwarmMember>();
-  for (const member of swarm.members) {
-    if (member.conversationId) byCid.set(member.conversationId.toLowerCase(), member);
-    byName.set(member.name.toLowerCase(), member);
-  }
+  const { byCid, byName } = indexSwarmMembers(swarm);
   let changed = false;
   for (const entry of roster.values()) {
     const member = matchSwarmMemberForSubagent(byCid, byName, entry.conversationId, entry.name);
@@ -1688,7 +1700,13 @@ export function formatAgySubagentsLivePreviewLines(
   roster: Map<string, AgySubagentEntry>,
   now = Date.now(),
   theme?: { fg(color: string, text: string): string },
+  excludeSwarm?: AgySwarmSnapshot,
 ): string[] {
+  const swarmIndex = excludeSwarm ? indexSwarmMembers(excludeSwarm) : undefined;
+  const isExcludedSwarmMember = (cid: string | undefined, name: string) =>
+    swarmIndex
+      ? Boolean(matchSwarmMemberForSubagent(swarmIndex.byCid, swarmIndex.byName, cid, name))
+      : false;
   const lines: string[] = [];
   const pushRow = (
     name: string,
@@ -1706,13 +1724,15 @@ export function formatAgySubagentsLivePreviewLines(
     );
   };
   for (const entry of roster.values()) {
-    const runningWorkers = (entry.workers ?? []).filter((w) => w.status === "running");
+    const runningWorkers = (entry.workers ?? []).filter(
+      (w) => w.status === "running" && !isExcludedSwarmMember(w.conversationId, w.name),
+    );
     // Render deepest/newest workers first so the stack matches agy native's TUI.
     for (let i = runningWorkers.length - 1; i >= 0; i -= 1) {
       const w = runningWorkers[i]!;
       pushRow(w.name, w.typeName, w.lastAction ?? w.lastActivity, w.startedAtMs);
     }
-    if (entry.status === "running") {
+    if (entry.status === "running" && !isExcludedSwarmMember(entry.conversationId, entry.name)) {
       pushRow(
         entry.name,
         entry.typeName,

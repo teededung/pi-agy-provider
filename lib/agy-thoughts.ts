@@ -19,7 +19,7 @@
  */
 
 import type { JsonObject } from "@earendil-works/pi-ai";
-import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -708,6 +708,8 @@ export class AgyThoughtTracker {
   #cliLogOffset = 0;
   #cliLogRemainder = "";
   #lastCliLogScanAtMs = 0;
+  #lastChildActivityCheckAtMs = 0;
+  #cachedHasActiveChild = false;
   #pendingMonitorCalls = 0;
   #awaitingUpstreamHeadersSinceMs: number | undefined;
   #awaitingPlannerSinceMs: number | undefined;
@@ -1013,6 +1015,7 @@ export class AgyThoughtTracker {
       rows,
       hasRunningStep,
       isGenerating,
+      awaitingPlannerAfterStep,
       nowMs,
     );
     const isCompacting = sqlCheckpointActive || cliCompacting;
@@ -1499,12 +1502,68 @@ export class AgyThoughtTracker {
     } catch {}
   }
 
+  /**
+   * True when a child subagent or swarm worker spawned by this conversation has
+   * recent transcript/DB writes (`<= 15s`). Subagents and swarm workers run in
+   * the same `agy` process and log their own `:streamGenerateContent` calls to
+   * the shared CLI/ACP log, which would otherwise trigger false-positive
+   * `Auto-compacting` indicators on high-context parent conversations.
+   */
+  #hasActiveChildConversation(nowMs: number): boolean {
+    if (!this.#conversationId) return false;
+    if (nowMs - this.#lastChildActivityCheckAtMs < 1_000 && this.#lastChildActivityCheckAtMs > 0) {
+      return this.#cachedHasActiveChild;
+    }
+    this.#lastChildActivityCheckAtMs = nowMs;
+    this.#cachedHasActiveChild = false;
+    try {
+      const brainDir = join(dirname(this.#conversationsDir), "brain");
+      const subDir = join(brainDir, this.#conversationId, ".system_generated", "subagents");
+      if (!existsSync(subDir)) return false;
+      const files = readdirSync(subDir);
+      const RECENT_MS = 15_000;
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        try {
+          const parsed = JSON.parse(readFileSync(join(subDir, file), "utf8")) as {
+            conversationId?: unknown;
+            state?: unknown;
+          };
+          if (
+            parsed.state !== "SUBAGENT_STATE_ALIVE" ||
+            typeof parsed.conversationId !== "string" ||
+            !parsed.conversationId
+          ) {
+            continue;
+          }
+          const childCid = parsed.conversationId;
+          const candidates = [
+            join(brainDir, childCid, ".system_generated", "logs", "transcript.jsonl"),
+            join(this.#conversationsDir, `${childCid}.db-wal`),
+            join(this.#conversationsDir, `${childCid}.db`),
+          ];
+          for (const candidate of candidates) {
+            try {
+              const st = statSync(candidate);
+              if (nowMs - st.mtimeMs <= RECENT_MS) {
+                this.#cachedHasActiveChild = true;
+                return true;
+              }
+            } catch {}
+          }
+        } catch {}
+      }
+    } catch {}
+    return false;
+  }
+
   #pollCliCompacting(
     overallMaxIdx: number,
     prePollMaxIdx: number,
     rows: StepRow[],
     hasRunningStep: boolean,
     isGenerating: boolean,
+    awaitingPlannerAfterStep: boolean,
     nowMs: number,
   ): boolean {
     this.#tailCliLog(prePollMaxIdx, nowMs);
@@ -1526,12 +1585,17 @@ export class AgyThoughtTracker {
     if (
       hasRunningStep ||
       isGenerating ||
+      !awaitingPlannerAfterStep ||
       overallMaxIdx > this.#streamStartMaxIdx ||
       matchedStepPayload
     ) {
       this.#activeStreamStartedAtMs = undefined;
       this.#activeStreamResponseId = undefined;
       this.#streamStartMaxIdx = -1;
+      return false;
+    }
+
+    if (this.#hasActiveChildConversation(nowMs)) {
       return false;
     }
 

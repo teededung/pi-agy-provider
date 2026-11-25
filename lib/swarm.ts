@@ -570,13 +570,28 @@ export async function readAgySwarmSnapshot(
   const coord = members.find((m) => m.role === "coordinator" || m.name === "coordinator");
   // A coordinator reply without tool calls means it paused to talk to the user
   // (or ended Turn 1 so native board tools unlock), not that the swarm finished.
-  const done = posts.some(
-    (p) =>
+  // In multi-wave swarms reusing one board, an older `[done]` from Wave 1..N-1
+  // is superseded as soon as workers start working or new board posts appear.
+  let lastCoordDoneSeq: number | undefined;
+  for (const p of posts) {
+    if (
       (p.agent === "coordinator" || p.agent === coord?.name) &&
       !p.all &&
       p.mentions.length === 0 &&
-      isDoneBoardPost(p.text),
-  );
+      isDoneBoardPost(p.text)
+    ) {
+      lastCoordDoneSeq = p.seq;
+    }
+  }
+  const hasActivityAfterDone =
+    lastCoordDoneSeq !== undefined &&
+    posts.some(
+      (p) =>
+        p.seq > lastCoordDoneSeq! &&
+        !p.control &&
+        !ROLE_WORKER_NAME_RE.test(p.agent),
+    );
+  const done = lastCoordDoneSeq !== undefined && !hasActivityAfterDone;
 
   const title =
     typeof roster.title === "string" && roster.title.trim()
@@ -701,9 +716,11 @@ export function formatSwarmWidgetHint(
   const postTail = snapshot.latestPost
     ? fg("dim", ` · #${snapshot.latestPost.seq} ${snapshot.latestPost.agent}`)
     : "";
+  const compactTitle =
+    snapshot.title.length > 28 ? `${snapshot.title.slice(0, 27).trimEnd()}…` : snapshot.title;
   return (
     fg("accent", "🐝 ") +
-    fg("text", `Swarm(${snapshot.title})`) +
+    fg("text", `Swarm(${compactTitle})`) +
     fg("dim", ` · ${workerCount}w · `) +
     statusTag +
     postTail +

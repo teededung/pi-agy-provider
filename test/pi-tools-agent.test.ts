@@ -2823,6 +2823,32 @@ test("AgyThoughtTracker detects live compaction from SQLite + CLI logs and extra
     const pCompacting = tracker.poll();
     assert.equal(pCompacting.isCompacting, true);
 
+    // When an active child subagent/swarm worker has fresh transcript writes (`<= 15s`),
+    // shared-log `:streamGenerateContent` lines must NOT falsely report `isCompacting`.
+    const childCid = "99999999-9999-4999-8999-999999999999";
+    const parentSubDir = path.join(tmp, "brain", cid, ".system_generated", "subagents");
+    const childLogDir = path.join(tmp, "brain", childCid, ".system_generated", "logs");
+    await mkdir(parentSubDir, { recursive: true });
+    await mkdir(childLogDir, { recursive: true });
+    await writeFile(
+      path.join(parentSubDir, `${childCid}.json`),
+      JSON.stringify({ conversationId: childCid, state: "SUBAGENT_STATE_ALIVE" }),
+      "utf8",
+    );
+    const childTranscript = path.join(childLogDir, "transcript.jsonl");
+    await writeFile(childTranscript, '{"step_index":9}\n', "utf8");
+    const childMtimeMs = (await stat(childTranscript)).mtimeMs;
+    let childNowMs = childMtimeMs + 1_000;
+    const childTracker = new AgyThoughtTracker(cid, conversationsDir, {
+      logDir,
+      now: () => childNowMs,
+    });
+    assert.equal(childTracker.poll().isCompacting, false);
+    childNowMs += 2_000;
+    assert.equal(childTracker.poll().isCompacting, false);
+    childTracker.close();
+    await rm(path.join(tmp, "brain"), { recursive: true, force: true });
+
     // Canceled checkpoint (status = 5) does not emit a completed checkpoint summary
     db.prepare("INSERT INTO steps (idx, step_type, status, step_payload) VALUES (?, ?, ?, ?)").run(
       93,

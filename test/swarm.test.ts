@@ -10,6 +10,7 @@ import {
   formatAgySubagentsLivePreviewLines,
   reconcileAgySubagentRosterWithSwarm,
   summarizeAgySubagentsWidget,
+  syncAgySubagentRoster,
   type AgySubagentEntry,
 } from "../lib/subagents.ts";
 import { AgyReplayStore } from "../lib/replay.ts";
@@ -173,6 +174,33 @@ test("readAgySwarmSnapshot, agyProbeSwarm, and agyProbeSubagents read roster, bo
   const doneSnap = await readAgySwarmSnapshot(coordId, { brainDir });
   assert.equal(doneSnap?.done, true);
   assert.equal((await agyProbeSwarm(coordId, brainDir)).hasAlive, false);
+
+  // Starting a new wave on the same board (new coordinator brief after earlier `[done]`)
+  // must flip `done` back to `false` until the new wave posts its own `[done]`.
+  await writeFile(
+    path.join(swarmDir, "board.jsonl"),
+    [
+      JSON.stringify({ seq: 1, agent: "coordinator", text: "@coder Rewrite parser.ts", time: "2026-11-16T06:00:00Z" }),
+      JSON.stringify({ seq: 2, agent: "coder", text: "@coordinator [done] Parser rewritten", time: "2026-11-16T06:01:00Z" }),
+      JSON.stringify({ seq: 3, agent: "coordinator", text: "[done] Wave 1 complete.", time: "2026-11-16T06:02:00Z" }),
+      JSON.stringify({ seq: 4, agent: "coordinator", text: "@coder Start Wave 2", time: "2026-11-16T06:05:00Z" }),
+    ].join("\n") + "\n",
+  );
+  const wave2Snap = await readAgySwarmSnapshot(coordId, { brainDir });
+  assert.equal(wave2Snap?.done, false);
+  assert.doesNotMatch(formatSwarmWidgetHint(wave2Snap!, plainTheme), /\bDone\b/);
+  await writeFile(
+    path.join(swarmDir, "board.jsonl"),
+    [
+      JSON.stringify({ seq: 1, agent: "coordinator", text: "@coder Rewrite parser.ts", time: "2026-11-16T06:00:00Z" }),
+      JSON.stringify({ seq: 2, agent: "coder", text: "@coordinator [done] Parser rewritten", time: "2026-11-16T06:01:00Z" }),
+      JSON.stringify({ seq: 3, agent: "coordinator", text: "[done] Wave 1 complete.", time: "2026-11-16T06:02:00Z" }),
+      JSON.stringify({ seq: 4, agent: "coordinator", text: "@coder Start Wave 2", time: "2026-11-16T06:05:00Z" }),
+      JSON.stringify({ seq: 5, agent: "coordinator", text: "[done] Wave 2 complete.", time: "2026-11-16T06:06:00Z" }),
+    ].join("\n") + "\n",
+  );
+  const wave2DoneSnap = await readAgySwarmSnapshot(coordId, { brainDir });
+  assert.equal(wave2DoneSnap?.done, true);
 });
 
 test("AgySwarmBoardDashboard renders panes, steps posts, filters by member, and zooms", () => {
@@ -415,6 +443,17 @@ test("reconcileAgySubagentRosterWithSwarm freezes elapsed time for sleeping/done
   assert.equal(reconcileAgySubagentRosterWithSwarm(roster, doneSwarm), true);
   assert.equal(roster.get("step-1")?.status, "running");
   assert.equal(roster.get("step-1")?.durationSeconds, undefined);
+
+  // Long swarm titles truncate cleanly so `/swarm board` stays visible in the status widget.
+  const longHint = formatSwarmWidgetHint(
+    {
+      ...doneSwarm,
+      title: "LaniRO Wave 3 (3.8-3.14) EN Translation Full Batch",
+    },
+    plainTheme,
+  );
+  assert.match(longHint, /Swarm\(LaniRO Wave 3 \(3\.8-3\.14\) EN…\)/);
+  assert.match(longHint, /\/swarm board/);
 });
 
 test("streamAntigravity expands /swarm, drops pi-tools restriction, uses continuation, and deactivates cleanly", async (t) => {
@@ -653,4 +692,123 @@ test("swarm wake_mode working, Turn 1 coordinator reply, mention-guarded [done],
   assert.ok(finished);
   assert.equal(finished.done, true);
   assert.equal(findPendingSwarmCoordinatorWake(finished), undefined);
+});
+
+test("syncAgySubagentRoster preserves distinct keys for batch-spawned swarm workers sharing spawnStepIndex and avoids running/done flapping", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "pi-agy-swarm-batch-keys-"));
+  const brainDir = path.join(root, "brain");
+  const coordId = "aaaaaaaa-1111-4111-8111-111111111111";
+  const workers = [
+    { name: "translator-8-1", cid: "11111111-1111-4111-8111-111111111111" },
+    { name: "translator-8-2", cid: "22222222-2222-4222-8222-222222222222" },
+    { name: "translator-8-3", cid: "33333333-3333-4333-8333-333333333333" },
+  ];
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const subDir = path.join(brainDir, coordId, ".system_generated", "subagents");
+  const swarmDir = path.join(brainDir, coordId, ".system_generated", "swarm");
+  await Promise.all([mkdir(subDir, { recursive: true }), mkdir(swarmDir, { recursive: true })]);
+
+  const members: Record<string, unknown> = {
+    coordinator: { conversation_id: coordId, role: "coordinator", wake_mode: "mentions" },
+  };
+  for (const w of workers) {
+    // All workers in one `swarm add` batch share the exact same spawnStepIndex!
+    await writeFile(
+      path.join(subDir, `${w.cid}.json`),
+      JSON.stringify({
+        conversationId: w.cid,
+        subagentDescriptor: { typeName: "worker", role: `Swarm Worker (${w.name})` },
+        state: "SUBAGENT_STATE_ALIVE",
+        spawnStepIndex: 2879,
+      }),
+    );
+    const logDir = path.join(brainDir, w.cid, ".system_generated", "logs");
+    await mkdir(logDir, { recursive: true });
+    await writeFile(
+      path.join(logDir, "transcript.jsonl"),
+      [
+        JSON.stringify({
+          step_index: 16,
+          type: "PLANNER_RESPONSE",
+          status: "DONE",
+          created_at: "2026-11-25T13:19:15Z",
+          tool_calls: [{ name: "post_message" }, { name: "swarm_wait" }],
+        }),
+        JSON.stringify({
+          step_index: 17,
+          type: "GENERIC",
+          status: "DONE",
+          created_at: "2026-11-25T13:19:19Z",
+        }),
+        JSON.stringify({
+          step_index: 18,
+          type: "GENERIC",
+          status: "DONE",
+          created_at: "2026-11-25T13:19:19Z",
+        }),
+      ].join("\n") + "\n",
+    );
+    members[w.name] = {
+      conversation_id: w.cid,
+      role: "worker",
+      wake_mode: "mentions",
+      killed: false,
+    };
+  }
+  await writeFile(
+    path.join(swarmDir, "members.json"),
+    JSON.stringify({ title: "Wave 8+9", members }),
+  );
+
+  const roster = new Map<string, AgySubagentEntry>();
+  await syncAgySubagentRoster(roster, coordId, brainDir);
+  assert.equal(roster.size, 3, "batch-spawned workers sharing spawnStepIndex must not collide");
+
+  const swarm = await readAgySwarmSnapshot(coordId, { brainDir });
+  assert.ok(swarm);
+  reconcileAgySubagentRosterWithSwarm(roster, swarm);
+  for (const entry of roster.values()) {
+    assert.equal(entry.status, "done");
+  }
+
+  // Subsequent poll must NOT overwrite existing done entries back to running before reconcile runs!
+  await syncAgySubagentRoster(roster, coordId, brainDir);
+  assert.equal(roster.size, 3);
+  for (const entry of roster.values()) {
+    assert.equal(entry.status, "done");
+  }
+
+  // When a swarm bar is present, live preview suppresses swarm workers while keeping non-swarm subagents.
+  const workingSwarm = {
+    ...swarm,
+    members: swarm.members.map((m) =>
+      m.name === "translator-8-2" ? { ...m, status: "working" as const } : m,
+    ),
+    workingCount: 1,
+  };
+  reconcileAgySubagentRosterWithSwarm(roster, workingSwarm);
+  roster.set("boost-1", {
+    key: "boost-1",
+    name: "DeepInvestigator",
+    typeName: "DeepInvestigator",
+    tool: "invoke_subagent",
+    status: "running",
+    startedAtMs: Date.now() - 10_000,
+    lastActivity: "step 4 · grep_search",
+    messages: 0,
+  });
+
+  const previewWithoutExclusion = formatAgySubagentsLivePreviewLines(roster, Date.now());
+  assert.equal(previewWithoutExclusion.length, 2);
+  const previewWithSwarm = formatAgySubagentsLivePreviewLines(
+    roster,
+    Date.now(),
+    undefined,
+    workingSwarm,
+  );
+  assert.equal(previewWithSwarm.length, 1);
+  assert.match(previewWithSwarm[0]!, /Agent\(DeepInvestigator\)/);
 });

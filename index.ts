@@ -1349,6 +1349,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
   let widgetLiveCount = -1;
   let widgetArtifactCount = -1;
   let latestSwarmSnapshot: AgySwarmSnapshot | undefined;
+  let swarmFooterHidden = false;
   let liveSteps: AgyStepItem[] = [];
   let lastRenderedLive = -1;
   let lastRenderedArtifacts = -1;
@@ -1440,13 +1441,24 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     const artifacts = Math.max(0, widgetArtifactCount);
     const subagents = subagentRoster.size;
     const swarm = latestSwarmSnapshot;
+    const showSwarmHint = Boolean(swarm && !swarmFooterHidden);
+    const showSubagentsHint = subagents > 0 && !(swarmFooterHidden && !hasRunningSubagent());
     const now = Date.now();
     const liveSubSummary = summarizeAgySubagentsWidget(subagentRoster, now);
-    const livePreviewPlain = formatAgySubagentsLivePreviewLines(subagentRoster, now);
-    const subagentSummary = [liveSubSummary ?? "", ...livePreviewPlain].join("\n");
-    const swarmKey = swarm
-      ? `${swarm.swarmId}:${swarm.title}:${swarm.headSeq}:${swarm.workingCount}:${swarm.waitingCount}:${swarm.done}:${swarm.newestUpdateMs}`
+    const livePreviewPlain = formatAgySubagentsLivePreviewLines(
+      subagentRoster,
+      now,
+      undefined,
+      swarm,
+    );
+    const subagentSummary = showSubagentsHint
+      ? [liveSubSummary ?? "", ...livePreviewPlain].join("\n")
       : "";
+    const swarmKey = showSwarmHint && swarm
+      ? `${swarm.swarmId}:${swarm.title}:${swarm.headSeq}:${swarm.workingCount}:${swarm.waitingCount}:${swarm.done}:${swarm.newestUpdateMs}`
+      : swarmFooterHidden
+        ? "hidden"
+        : "";
     const openSteps = hasOpenAgySteps(liveSteps) ? liveSteps : [];
     const stepsKey = openSteps.map((s) => `${s.status}:${s.title}`).join("|");
 
@@ -1454,7 +1466,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       !force &&
       liveTasks === lastRenderedLive &&
       artifacts === lastRenderedArtifacts &&
-      subagents === lastRenderedSubagents &&
+      (showSubagentsHint ? subagents : 0) === lastRenderedSubagents &&
       subagentSummary === lastRenderedSubagentSummary &&
       swarmKey === lastRenderedSwarmKey &&
       stepsKey === lastRenderedStepsKey
@@ -1463,7 +1475,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     }
     lastRenderedLive = liveTasks;
     lastRenderedArtifacts = artifacts;
-    lastRenderedSubagents = subagents;
+    lastRenderedSubagents = showSubagentsHint ? subagents : 0;
     lastRenderedSubagentSummary = subagentSummary;
     lastRenderedSwarmKey = swarmKey;
     lastRenderedStepsKey = stepsKey;
@@ -1475,13 +1487,22 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       if (
         liveTasks === 0 &&
         artifacts === 0 &&
-        subagents === 0 &&
-        !swarm &&
+        !showSubagentsHint &&
+        !showSwarmHint &&
         openSteps.length === 0
       ) {
         tasksUi.setWidget(AGY_STATUS_WIDGET_KEY, undefined);
         return;
       }
+
+      // Freeze a snapshot of the roster so TUI redraws never observe mid-poll
+      // mutations between syncAgySubagentRoster and reconcileAgySubagentRosterWithSwarm.
+      const rosterSnapshot = new Map<string, AgySubagentEntry>(
+        [...subagentRoster.entries()].map(([k, v]) => [
+          k,
+          v.workers ? { ...v, workers: v.workers.map((w) => ({ ...w })) } : { ...v },
+        ]),
+      );
 
       tasksUi.setWidget(AGY_STATUS_WIDGET_KEY, (tui, theme) => {
         // Click regions for the slash-command hints, rebuilt on every render.
@@ -1491,13 +1512,16 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
             const stepLines = formatAgyStepsChecklistLines(openSteps, theme).map((line) =>
               truncateToWidth(line, width, ""),
             );
-            const previewLines = formatAgySubagentsLivePreviewLines(
-              subagentRoster,
-              now,
-              theme,
-            ).map((line) => truncateToWidth(line, width, ""));
+            const previewLines = showSubagentsHint
+              ? formatAgySubagentsLivePreviewLines(
+                  rosterSnapshot,
+                  now,
+                  theme,
+                  swarm,
+                ).map((line) => truncateToWidth(line, width, ""))
+              : [];
             const items: string[] = [];
-            if (swarm) {
+            if (showSwarmHint && swarm) {
               items.push(formatSwarmWidgetHint(swarm, theme));
             }
             if (liveTasks > 0) {
@@ -1518,7 +1542,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
                   theme.fg("dim", " to view"),
               );
             }
-            if (subagents > 0) {
+            if (showSubagentsHint) {
               items.push(
                 theme.fg("accent", "◆ ") +
                   theme.fg(
@@ -2490,6 +2514,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     oneShotGrill = false;
     oneShotSwarm = false;
     latestSwarmSnapshot = undefined;
+    swarmFooterHidden = false;
     liveSteps = [];
     lastRenderedSwarmKey = "";
     lastRenderedStepsKey = "";
@@ -2848,6 +2873,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     widgetLiveCount = -1;
     widgetArtifactCount = -1;
     latestSwarmSnapshot = undefined;
+    swarmFooterHidden = false;
     liveSteps = [];
     lastRenderedLive = -1;
     lastRenderedArtifacts = -1;
@@ -3256,6 +3282,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       oneShotGrill = false;
       oneShotSwarm = false;
       latestSwarmSnapshot = undefined;
+      swarmFooterHidden = false;
       lastSwarmWakeSeqBySwarm.clear();
       teamworkLaunchedThisTurn = false;
       sessionTeamworkMode = false;
@@ -3285,6 +3312,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       oneShotGrill = false;
       oneShotSwarm = false;
       latestSwarmSnapshot = undefined;
+      swarmFooterHidden = false;
       lastSwarmWakeSeqBySwarm.clear();
       teamworkLaunchedThisTurn = false;
       sessionTeamworkMode = false;
@@ -3749,6 +3777,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
           const snapshot = await runAntigravity(runtime, service.snapshot);
           if (snapshot.conversationId) {
             await syncAgySubagentRoster(subagentRoster, snapshot.conversationId);
+            reconcileAgySubagentRosterWithSwarm(subagentRoster, latestSwarmSnapshot);
             renderAgyStatusWidget();
           }
         } catch {
@@ -4032,12 +4061,28 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
   };
 
   const swarmCommandCompletions = (prefix: string) =>
-    ["board", "on", "off", "status"]
+    ["board", "show", "hide", "on", "off", "status"]
       .filter((value) => value.startsWith(prefix))
       .map((value) => ({ value, label: value }));
 
   const handleSwarmCommand = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
     const trimmed = args.trim();
+    if (/^hide$/i.test(trimmed)) {
+      swarmFooterHidden = true;
+      renderAgyStatusWidget(true);
+      ctx.ui.notify(
+        "Swarm footer hidden (/swarm show to restore; /swarm board still works).",
+        "info",
+      );
+      return;
+    }
+    if (/^show$/i.test(trimmed)) {
+      swarmFooterHidden = false;
+      renderAgyStatusWidget(true);
+      updateAgyTasksWidget();
+      ctx.ui.notify("Swarm footer shown.", "info");
+      return;
+    }
     if (/^board(?:\s+(?:text|list))?$/i.test(trimmed)) {
       const textMode = /\b(?:text|list)$/i.test(trimmed);
       await openSwarmBoardForCtx(ctx, textMode);
@@ -4077,6 +4122,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     }
     if (/^(on|enable|true)$/i.test(trimmed)) {
       sessionSwarmMode = true;
+      swarmFooterHidden = false;
       sessionBoostMode = false;
       oneShotBoost = false;
       sessionTeamworkMode = false;
@@ -4111,6 +4157,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     }
 
     oneShotSwarm = true;
+    swarmFooterHidden = false;
     sessionBoostMode = false;
     oneShotBoost = false;
     sessionTeamworkMode = false;
@@ -4128,7 +4175,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 
   pi.registerCommand("swarm", {
     description:
-      "(Preview & Quota Heavy) Run a native multi-agent swarm on a shared board (/swarm <task>, /swarm board, /swarm on|off|status)",
+      "(Preview & Quota Heavy) Run a native multi-agent swarm on a shared board (/swarm <task>, /swarm board, /swarm show|hide, /swarm on|off|status)",
     getArgumentCompletions: swarmCommandCompletions,
     handler: handleSwarmCommand,
   });
