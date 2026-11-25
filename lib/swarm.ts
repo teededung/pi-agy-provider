@@ -704,7 +704,7 @@ export function formatSwarmWidgetHint(
   return (
     fg("accent", "🐝 ") +
     fg("text", `Swarm(${snapshot.title})`) +
-    fg("dim", ` · ${workerCount}m · `) +
+    fg("dim", ` · ${workerCount}w · `) +
     statusTag +
     postTail +
     fg("dim", " • ") +

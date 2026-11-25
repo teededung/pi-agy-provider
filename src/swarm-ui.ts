@@ -21,6 +21,8 @@ import {
   wrapTextWithAnsi,
   type Component,
   type TUI,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import { readAgySubagentProgressLog, type AgySubagentStatus } from "../lib/subagents.ts";
 import type { AgySwarmMember, AgySwarmPost, AgySwarmSnapshot } from "../lib/swarm.ts";
@@ -115,6 +117,15 @@ export class AgySwarmBoardDashboard implements Component {
   private messageScroll = 0;
 
   private memberDetail: MemberTranscriptDetail | null = null;
+  private lastLayout?: {
+    headerRows: number;
+    topHeight: number;
+    bodyHeight: number;
+    leftWidth: number;
+    rosterStart: number;
+    postsStart: number;
+    zoomed: boolean;
+  };
   private closed = false;
   private liveRefreshInFlight = false;
   private liveRefreshTimer: ReturnType<typeof setInterval>;
@@ -160,8 +171,8 @@ export class AgySwarmBoardDashboard implements Component {
       return;
     }
     if (this.follow) {
-      this.postIndex = visiblePosts.length - 1;
-      this.selectedPostSeq = visiblePosts[this.postIndex]?.seq;
+      this.postIndex = 0;
+      this.selectedPostSeq = visiblePosts[0]?.seq;
       this.messageScroll = 0;
       return;
     }
@@ -174,8 +185,9 @@ export class AgySwarmBoardDashboard implements Component {
     this.selectedPostSeq = visiblePosts[this.postIndex]?.seq;
   }
 
+  /** Newest posts first so the latest swarm activity stays pinned at the top. */
   private visiblePosts(): AgySwarmPost[] {
-    return filterSwarmPosts(this.snapshot.posts, this.memberFilter);
+    return filterSwarmPosts(this.snapshot.posts, this.memberFilter).reverse();
   }
 
   private stopLiveRefresh(): void {
@@ -279,17 +291,43 @@ export class AgySwarmBoardDashboard implements Component {
       return;
     }
 
-    // Tab / Shift+Tab cycle panes.
-    if (data === "\t" || this.keybindings.matches(data, "tui.input.tab")) {
+    // Tab / Shift+Tab cycle panes (including Kitty keyboard protocol sequences).
+    if (data === "\t" || data === "\x1b[9u" || this.keybindings.matches(data, "tui.input.tab")) {
       const idx = PANES.indexOf(this.focusPane);
       this.focusPane = PANES[(idx + 1) % PANES.length]!;
       this.tui.requestRender();
       return;
     }
-    if (data === "\x1b[Z") {
+    if (data === "\x1b[Z" || data === "\x1b[9;2u") {
       const idx = PANES.indexOf(this.focusPane);
       this.focusPane = PANES[(idx - 1 + PANES.length) % PANES.length]!;
       this.tui.requestRender();
+      return;
+    }
+
+    // Left / Right arrows (and h / l) jump directly between Roster and Posts.
+    if (
+      data === "\x1b[D" ||
+      data === "\x1bOD" ||
+      data === "h" ||
+      this.keybindings.matches(data, "tui.editor.cursorLeft")
+    ) {
+      if (this.focusPane !== "roster") {
+        this.focusPane = "roster";
+        this.tui.requestRender();
+      }
+      return;
+    }
+    if (
+      data === "\x1b[C" ||
+      data === "\x1bOC" ||
+      data === "l" ||
+      this.keybindings.matches(data, "tui.editor.cursorRight")
+    ) {
+      if (this.focusPane !== "posts") {
+        this.focusPane = "posts";
+        this.tui.requestRender();
+      }
       return;
     }
 
@@ -298,12 +336,13 @@ export class AgySwarmBoardDashboard implements Component {
       this.tui.requestRender();
       return;
     }
+    // `[` steps to previous (older) post; `]` steps to next (newer) post in newest-first order.
     if (data === "[") {
-      this.stepPost(-1);
+      this.stepPost(1);
       return;
     }
     if (data === "]") {
-      this.stepPost(1);
+      this.stepPost(-1);
       return;
     }
     if (data === "f") {
@@ -421,6 +460,100 @@ export class AgySwarmBoardDashboard implements Component {
     }
   }
 
+  private hitPane(x: number, y: number): { pane: SwarmBoardPane; contentRow: number } | undefined {
+    const layout = this.lastLayout;
+    if (!layout) return undefined;
+    if (y < layout.headerRows || y >= layout.headerRows + layout.bodyHeight) return undefined;
+    if (layout.zoomed) {
+      return { pane: this.focusPane, contentRow: y - layout.headerRows - 1 };
+    }
+    if (y < layout.headerRows + layout.topHeight) {
+      const contentRow = y - layout.headerRows - 1;
+      return x < layout.leftWidth
+        ? { pane: "roster", contentRow }
+        : { pane: "posts", contentRow };
+    }
+    return { pane: "message", contentRow: y - layout.headerRows - layout.topHeight - 1 };
+  }
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.memberDetail) {
+      if (event.type === "wheel") {
+        const delta = event.wheelDelta ?? 0;
+        if (delta !== 0) {
+          const viewport = Math.max(6, (this.tui.terminal.rows || 30) - 8);
+          const maxScroll = Math.max(0, this.memberDetail.lines.length - viewport);
+          this.memberDetail.scroll = Math.min(Math.max(0, this.memberDetail.scroll + delta), maxScroll);
+          this.tui.requestRender();
+        }
+        return { handled: true, render: true };
+      }
+      return undefined;
+    }
+
+    if (event.type === "wheel") {
+      const delta = event.wheelDelta ?? 0;
+      if (delta === 0) return { handled: true, render: false };
+      const hit = this.hitPane(event.x, event.y);
+      const pane = hit?.pane ?? this.focusPane;
+      if (pane === "roster") {
+        const len = this.snapshot.members.length;
+        if (len > 0) {
+          const step = delta < 0 ? -1 : 1;
+          this.memberIndex = Math.min(Math.max(0, this.memberIndex + step), len - 1);
+          this.selectedMemberName = this.snapshot.members[this.memberIndex]?.name;
+          this.tui.requestRender();
+        }
+      } else if (pane === "posts") {
+        this.stepPost(delta < 0 ? -1 : 1);
+      } else {
+        this.messageScroll = Math.max(0, this.messageScroll + delta);
+        this.tui.requestRender();
+      }
+      return { handled: true, render: true };
+    }
+
+    if (event.button !== "left" || event.shift || event.alt || event.ctrl) return undefined;
+    const hit = this.hitPane(event.x, event.y);
+    if (!hit) return undefined;
+
+    if (event.type === "press") {
+      this.focusPane = hit.pane;
+      const layout = this.lastLayout;
+      if (hit.pane === "roster" && layout && hit.contentRow >= 0) {
+        const idx = layout.rosterStart + hit.contentRow;
+        if (idx >= 0 && idx < this.snapshot.members.length) {
+          this.memberIndex = idx;
+          this.selectedMemberName = this.snapshot.members[idx]?.name;
+        }
+      } else if (hit.pane === "posts" && layout && hit.contentRow >= 0) {
+        const visible = this.visiblePosts();
+        const idx = layout.postsStart + hit.contentRow;
+        if (idx >= 0 && idx < visible.length) {
+          this.follow = false;
+          this.postIndex = idx;
+          this.selectedPostSeq = visible[idx]?.seq;
+          this.messageScroll = 0;
+        }
+      }
+      this.tui.requestRender();
+      return { handled: true, focus: true, render: true };
+    }
+
+    if (event.type === "click" && (event.clickCount ?? 1) >= 2 && hit.pane === "roster" && hit.contentRow >= 0) {
+      const layout = this.lastLayout;
+      const idx = layout ? layout.rosterStart + hit.contentRow : -1;
+      if (idx >= 0 && idx < this.snapshot.members.length) {
+        this.memberIndex = idx;
+        this.selectedMemberName = this.snapshot.members[idx]?.name;
+        void this.openSelectedMemberDetail();
+        return { handled: true, render: true };
+      }
+    }
+
+    return undefined;
+  }
+
   private renderMemberDetail(width: number, totalHeight: number): string[] {
     const t = this.theme;
     const detail = this.memberDetail!;
@@ -464,20 +597,26 @@ export class AgySwarmBoardDashboard implements Component {
   ): string[] {
     const t = this.theme;
     const inner = Math.max(8, width - 2);
-    const borderColor = focused ? "accent" : "borderMuted";
-    const titleLabel = focused ? t.fg("accent", t.bold(` ${title} `)) : t.fg("muted", ` ${title} `);
+    const border = focused
+      ? (s: string) => t.bold(t.fg("accent", s))
+      : (s: string) => t.fg("borderMuted", s);
+    const [tl, tr, bl, br, h, v] = focused
+      ? ["┏", "┓", "┗", "┛", "━", "┃"]
+      : ["┌", "┐", "└", "┘", "─", "│"];
+    const maxTitleW = Math.max(4, width - 4);
+    const rawTitle = truncateToWidth(focused ? ` ● ${title} ` : ` ${title} `, maxTitleW, "…");
+    const titleLabel = focused ? t.fg("accent", t.bold(rawTitle)) : t.fg("muted", rawTitle);
     const titleW = visibleWidth(titleLabel);
     const fill = Math.max(0, width - 3 - titleW);
-    const top =
-      t.fg(borderColor, "┌─") + titleLabel + t.fg(borderColor, `${"─".repeat(fill)}┐`);
+    const top = border(`${tl}${h}`) + titleLabel + border(`${h.repeat(fill)}${tr}`);
 
     const contentHeight = Math.max(1, height - 2);
     const rows: string[] = [top];
     for (let i = 0; i < contentHeight; i += 1) {
       const line = bodyLines[i] ?? "";
-      rows.push(t.fg(borderColor, "│") + padRight(line, inner) + t.fg(borderColor, "│"));
+      rows.push(border(v) + padRight(line, inner) + border(v));
     }
-    rows.push(t.fg(borderColor, `└${"─".repeat(Math.max(0, width - 2))}┘`));
+    rows.push(border(`${bl}${h.repeat(Math.max(0, width - 2))}${br}`));
     return rows;
   }
 
@@ -516,13 +655,15 @@ export class AgySwarmBoardDashboard implements Component {
     const footerHelp = truncateToWidth(
       t.fg(
         "dim",
-        "tab pane · ↑/↓ move · [/] post · z zoom · p filter · f follow · o member log · r refresh · esc close",
+        "tab/←→ pane · ↑/↓ move · enter open · [/] post · z zoom · p filter · f follow · o member log · r refresh · esc close",
       ),
       safeWidth,
       "…",
     );
 
     const bodyHeight = Math.max(10, totalRows - headerLines.length - 1);
+    let rosterStart = 0;
+    let postsStart = 0;
 
     const buildRosterLines = (innerW: number, maxRows: number): string[] => {
       if (snap.members.length === 0) return [t.fg("dim", "(no members yet)")];
@@ -530,9 +671,12 @@ export class AgySwarmBoardDashboard implements Component {
         0,
         Math.min(this.memberIndex - Math.floor(maxRows / 2), snap.members.length - maxRows),
       );
+      rosterStart = start;
       return snap.members.slice(start, start + maxRows).map((m, i) => {
         const selected = start + i === this.memberIndex;
-        const prefix = selected ? t.fg("accent", "› ") : "  ";
+        const prefix = selected
+          ? t.fg(this.focusPane === "roster" ? "accent" : "dim", "› ")
+          : "  ";
         const glyph = memberStatusGlyph(m, t);
         const unread = m.unread > 0 ? t.fg("warning", ` (${m.unread})`) : "";
         const activity = m.failure
@@ -564,9 +708,12 @@ export class AgySwarmBoardDashboard implements Component {
         0,
         Math.min(this.postIndex - Math.floor(maxRows / 2), visiblePosts.length - maxRows),
       );
+      postsStart = start;
       return visiblePosts.slice(start, start + maxRows).map((p, i) => {
         const selected = start + i === this.postIndex;
-        const prefix = selected ? t.fg("accent", "› ") : "  ";
+        const prefix = selected
+          ? t.fg(this.focusPane === "posts" ? "accent" : "dim", "› ")
+          : "  ";
         const ts = formatPostTime(p.time);
         const chan = p.channel ? t.fg("muted", ` [${p.channel}]`) : "";
         const head = `${prefix}${t.fg("dim", `#${p.seq}`)} ${
@@ -596,6 +743,15 @@ export class AgySwarmBoardDashboard implements Component {
           : this.focusPane === "posts"
             ? buildPostLines(innerW, innerH)
             : buildMessageLines(innerW, innerH);
+      this.lastLayout = {
+        headerRows: headerLines.length,
+        topHeight: bodyHeight,
+        bodyHeight,
+        leftWidth: safeWidth,
+        rosterStart,
+        postsStart,
+        zoomed: true,
+      };
       const title =
         this.focusPane === "roster"
           ? `Roster (${snap.members.length})`
@@ -630,6 +786,15 @@ export class AgySwarmBoardDashboard implements Component {
       rightWidth,
       topHeight,
     );
+    this.lastLayout = {
+      headerRows: headerLines.length,
+      topHeight,
+      bodyHeight,
+      leftWidth,
+      rosterStart,
+      postsStart,
+      zoomed: false,
+    };
     const topCombined = rosterBox.map((line, i) => `${line}${postsBox[i] ?? ""}`);
 
     const messageTitle = selectedPost

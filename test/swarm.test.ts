@@ -6,6 +6,12 @@ import { test } from "node:test";
 import { AgyPiBridge } from "../lib/bridge.ts";
 import { ALL_FALLBACK_MODELS } from "../lib/models.ts";
 import { formatAgyCall } from "../lib/render.ts";
+import {
+  formatAgySubagentsLivePreviewLines,
+  reconcileAgySubagentRosterWithSwarm,
+  summarizeAgySubagentsWidget,
+  type AgySubagentEntry,
+} from "../lib/subagents.ts";
 import { AgyReplayStore } from "../lib/replay.ts";
 import {
   agyProbeSwarm,
@@ -251,11 +257,64 @@ test("AgySwarmBoardDashboard renders panes, steps posts, filters by member, and 
 
   const initialOut = dash.render(100).join("\n");
   assert.match(initialOut, /🐝 Swarm\(refactor board\)/);
-  assert.match(initialOut, /Roster \(2\)/);
-  assert.match(initialOut, /Posts \(2\)/);
+  assert.match(initialOut, /┌─ Roster \(2\)/);
+  assert.match(initialOut, /┏━ ● Posts \(2\)/);
   assert.match(initialOut, /Message #2 · @coder/);
+  // Posts pane shows newest post (#2) above older post (#1).
+  assert.ok(initialOut.indexOf("#2 @coder") < initialOut.indexOf("#1 @coordinator"));
 
-  // Step to #1, zoom in, then unzoom and close.
+  // Left arrow jumps straight to Roster; ↑/↓ selects member; Right arrow returns to Posts.
+  dash.handleInput("\x1b[D");
+  dash.handleInput("down"); // selects "coder"
+  dash.handleInput("p"); // filter by selected member ("coder")
+  assert.match(dash.render(100).join("\n"), /filter:@coder/);
+  dash.handleInput("p"); // clear filter
+  dash.handleInput("\x1b[C"); // right arrow back to posts
+
+  // Mouse click on Roster row 1 ("coder") focuses Roster and selects "coder"; click on Posts row 1 selects older #1.
+  dash.render(100);
+  dash.handleMouse({
+    type: "press",
+    button: "left",
+    x: 5,
+    y: 3, // headerRows=1, top border=1, row 0=coordinator (y=2), row 1=coder (y=3)
+    screenX: 5,
+    screenY: 3,
+    width: 100,
+    height: 28,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  dash.handleInput("z");
+  assert.match(dash.render(100).join("\n"), /zoom:roster/);
+  dash.handleInput("z"); // unzoom
+  dash.render(100);
+  dash.handleMouse({
+    type: "press",
+    button: "left",
+    x: 50,
+    y: 3, // second row in newest-first order (#1 @coordinator)
+    screenX: 50,
+    screenY: 3,
+    width: 100,
+    height: 28,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  assert.match(dash.render(100).join("\n"), /Message #1 · @coordinator/);
+
+  // Kitty Shift+Tab (`\x1b[9;2u`) cycles backwards from posts -> roster.
+  dash.handleInput("\x1b[9;2u");
+  dash.handleInput("z");
+  assert.match(dash.render(100).join("\n"), /zoom:roster/);
+  dash.handleInput("z"); // unzoom
+
+  // Step forward `]` back to #2, then `[` back to #1, zoom in, unzoom and close.
+  dash.handleInput("\x1b[C"); // focus posts
+  dash.handleInput("]");
+  assert.match(dash.render(100).join("\n"), /Message #2 · @coder/);
   dash.handleInput("[");
   assert.match(dash.render(100).join("\n"), /Message #1 · @coordinator/);
   dash.handleInput("z");
@@ -265,6 +324,97 @@ test("AgySwarmBoardDashboard renders panes, steps posts, filters by member, and 
   dash.handleInput("\x1b"); // closes
   assert.equal(closed, true);
   dash.dispose();
+});
+
+test("reconcileAgySubagentRosterWithSwarm freezes elapsed time for sleeping/done swarm workers so footer stops ticking", () => {
+  const t0 = 1_700_000_000_000;
+  const tDone = t0 + 95_000; // finished in 1m35s
+  const tLater = t0 + 25 * 60_000; // 25 minutes later
+
+  const roster = new Map<string, AgySubagentEntry>([
+    [
+      "step-1",
+      {
+        key: "step-1",
+        name: "Swarm Worker (translator-4)",
+        typeName: "worker",
+        tool: "invoke_subagent",
+        status: "running",
+        startedAtMs: t0,
+        lastUpdatedAtMs: tDone,
+        lastActivity: "step 21 · post_message",
+        conversationId: "aaaa1111-1111-4111-8111-111111111111",
+        messages: 0,
+      },
+    ],
+    [
+      "step-2",
+      {
+        key: "step-2",
+        name: "Swarm Worker (verifier)",
+        typeName: "worker",
+        tool: "invoke_subagent",
+        status: "running",
+        startedAtMs: t0,
+        lastUpdatedAtMs: tDone,
+        lastActivity: "step 12 · post_message",
+        conversationId: "bbbb2222-2222-4222-8222-222222222222",
+        messages: 0,
+      },
+    ],
+  ]);
+
+  const doneSwarm = {
+    swarmId: "swarm-1",
+    coordinatorConversationId: "coord-1",
+    dir: "/tmp/swarm",
+    title: "LaniRO Wave 1",
+    members: [
+      {
+        name: "translator-4",
+        conversationId: "aaaa1111-1111-4111-8111-111111111111",
+        killed: false,
+        status: "waiting" as const,
+        unread: 0,
+        postCount: 1,
+        transcriptMtime: tDone,
+      },
+      {
+        name: "verifier",
+        conversationId: "bbbb2222-2222-4222-8222-222222222222",
+        killed: false,
+        status: "waiting" as const,
+        unread: 0,
+        postCount: 1,
+        transcriptMtime: tDone,
+      },
+    ],
+    posts: [],
+    headSeq: 16,
+    workingCount: 0,
+    waitingCount: 2,
+    stoppedCount: 0,
+    killedCount: 0,
+    failedCount: 0,
+    done: true,
+    newestUpdateMs: tDone,
+  };
+
+  assert.equal(reconcileAgySubagentRosterWithSwarm(roster, doneSwarm), true);
+  assert.equal(roster.get("step-1")?.status, "done");
+  assert.equal(roster.get("step-1")?.durationSeconds, 95);
+  assert.equal(roster.get("step-2")?.status, "done");
+  assert.equal(roster.get("step-2")?.durationSeconds, 95);
+
+  // Live preview clears finished swarm workers, and summary freezes at 1m35s even 25 minutes later!
+  assert.deepEqual(formatAgySubagentsLivePreviewLines(roster, tLater), []);
+  assert.equal(summarizeAgySubagentsWidget(roster, tLater), "2 tracked (done · 1m35s)");
+
+  // If a worker wakes up again for Wave 2, it returns to running.
+  doneSwarm.members[0]!.status = "working" as any;
+  assert.equal(reconcileAgySubagentRosterWithSwarm(roster, doneSwarm), true);
+  assert.equal(roster.get("step-1")?.status, "running");
+  assert.equal(roster.get("step-1")?.durationSeconds, undefined);
 });
 
 test("streamAntigravity expands /swarm, drops pi-tools restriction, uses continuation, and deactivates cleanly", async (t) => {

@@ -176,6 +176,7 @@ import {
   formatAgySubagents,
   formatAgySubagentsLivePreviewLines,
   isAgySubagentTool,
+  reconcileAgySubagentRosterWithSwarm,
   shouldInterceptSubagentSteerInput,
   summarizeAgySubagentsWidget,
   syncAgySubagentRoster,
@@ -1671,6 +1672,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
           readAgySwarmSnapshot(snapshot.conversationId).catch(() => undefined),
         ]);
         latestSwarmSnapshot = swarm;
+        reconcileAgySubagentRosterWithSwarm(subagentRoster, swarm);
         setAgyTasksWidget(
           tasks.filter(
             (task) => task.pids.length > 0 || task.orphans.length > 0 || task.ambiguous.length > 0,

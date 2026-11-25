@@ -18,6 +18,7 @@ import { Markdown, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { isAgyEditTool, safeRenderDiff } from "./diff.ts";
 import type { AgyActivity } from "./reducer.ts";
 import { cleanToolOutputLines, formatAgyCall, summarizeAgyResult } from "./render.ts";
+import type { AgySwarmMember, AgySwarmSnapshot } from "./swarm.ts";
 import { agyToolStepKey } from "./tool-steps.ts";
 
 export type AgySubagentStatus = "running" | "done" | "error" | "killed";
@@ -940,6 +941,94 @@ export async function syncAgySubagentRoster(
     }
   }
 
+  return changed;
+}
+
+function matchSwarmMemberForSubagent(
+  byCid: ReadonlyMap<string, AgySwarmMember>,
+  byName: ReadonlyMap<string, AgySwarmMember>,
+  conversationId: string | undefined,
+  name: string,
+): AgySwarmMember | undefined {
+  if (conversationId) {
+    const exact = byCid.get(conversationId.toLowerCase());
+    if (exact) return exact;
+  }
+  const direct = byName.get(name.toLowerCase());
+  if (direct) return direct;
+  const wrapped = /^swarm worker \((.+)\)$/i.exec(name.trim())?.[1]?.trim().toLowerCase();
+  return wrapped ? byName.get(wrapped) : undefined;
+}
+
+function applySwarmMemberStatus(
+  target: {
+    status: AgySubagentStatus;
+    startedAtMs: number;
+    durationSeconds?: number;
+    lastUpdatedAtMs?: number;
+    error?: string;
+  },
+  member: AgySwarmMember,
+): boolean {
+  if (member.status === "working") {
+    if (target.status !== "running") {
+      target.status = "running";
+      target.durationSeconds = undefined;
+      return true;
+    }
+    return false;
+  }
+  const nextStatus: AgySubagentStatus =
+    member.status === "killed" ? "killed" : member.failure ? "error" : "done";
+  const endMs = Math.max(
+    target.startedAtMs,
+    target.lastUpdatedAtMs ?? 0,
+    member.transcriptMtime ?? 0,
+  );
+  const nextDuration = Math.max(0, (endMs - target.startedAtMs) / 1000);
+  if (target.status !== nextStatus || target.durationSeconds === undefined) {
+    target.status = nextStatus;
+    target.durationSeconds = nextDuration;
+    if (member.failure && !target.error) {
+      target.error = member.failure.text;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Reconcile swarm workers tracked in `subagentRoster` against the authoritative
+ * swarm snapshot. Swarm workers remain `SUBAGENT_STATE_ALIVE` on disk while
+ * asleep (`waiting`) on the board, so without reconciliation their elapsed
+ * timer would keep ticking forever after their turn (or the entire swarm) ends.
+ */
+export function reconcileAgySubagentRosterWithSwarm(
+  roster: Map<string, AgySubagentEntry>,
+  swarm: AgySwarmSnapshot | undefined,
+): boolean {
+  if (!swarm || roster.size === 0) return false;
+  const byCid = new Map<string, AgySwarmMember>();
+  const byName = new Map<string, AgySwarmMember>();
+  for (const member of swarm.members) {
+    if (member.conversationId) byCid.set(member.conversationId.toLowerCase(), member);
+    byName.set(member.name.toLowerCase(), member);
+  }
+  let changed = false;
+  for (const entry of roster.values()) {
+    const member = matchSwarmMemberForSubagent(byCid, byName, entry.conversationId, entry.name);
+    if (member && applySwarmMemberStatus(entry, member)) {
+      changed = true;
+    }
+    if (entry.workers) {
+      for (const worker of entry.workers) {
+        const wm = matchSwarmMemberForSubagent(byCid, byName, worker.conversationId, worker.name);
+        if (wm && applySwarmMemberStatus(worker, wm)) {
+          changed = true;
+        }
+      }
+    }
+  }
   return changed;
 }
 
