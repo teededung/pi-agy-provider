@@ -247,7 +247,10 @@ import {
   type AntigravityStateSnapshot,
 } from "./src/runtime.ts";
 
-const MODEL_CACHE_FILE = path.join(piConfigDir("antigravity"), "model-list.json");
+/** Compute dynamically so Pi 1.7.0+ `--agent-dir` / `PI_CODING_AGENT_DIR` always takes effect. */
+export function modelCacheFile(): string {
+  return path.join(piConfigDir("antigravity"), "model-list.json");
+}
 const DISCOVERY_TIMEOUT_MS = 15_000;
 
 function statusOneLine(value: string, maxLength = 160): string {
@@ -319,7 +322,7 @@ async function listAgyModels(): Promise<AgyModelInfo[]> {
 }
 
 function getInitialModelCache(): ModelCache {
-  const cached = readJson<ModelCache | null>(MODEL_CACHE_FILE, null);
+  const cached = readJson<ModelCache | null>(modelCacheFile(), null);
   if (cached?.models?.length && modelCacheIsFresh(cached)) {
     return { ...cached, models: normalizeModels(cached.models) };
   }
@@ -338,8 +341,9 @@ async function discoverModels(
   refresh = false,
   acpFallbackModels?: AgyModelInfo[],
 ): Promise<ModelCache> {
+  const cacheFile = modelCacheFile();
   if (!refresh) {
-    const cached = readJson<ModelCache | null>(MODEL_CACHE_FILE, null);
+    const cached = readJson<ModelCache | null>(cacheFile, null);
     if (cached?.models?.length && modelCacheIsFresh(cached)) {
       return { ...cached, models: normalizeModels(cached.models) };
     }
@@ -361,7 +365,7 @@ async function discoverModels(
     ? { fetchedAt: Date.now(), source: "live", models: normalizeModels(combinedLive) }
     : { fetchedAt: Date.now(), source: "fallback", models: FALLBACK_MODELS };
   try {
-    writeJson(MODEL_CACHE_FILE, cache);
+    writeJson(cacheFile, cache);
   } catch {
     // Cache is best-effort; discovery still returns.
   }
@@ -2416,7 +2420,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
         };
         registerAntigravityProvider(currentCache.models);
         try {
-          writeJson(MODEL_CACHE_FILE, currentCache);
+          writeJson(modelCacheFile(), currentCache);
         } catch {}
       }
     }

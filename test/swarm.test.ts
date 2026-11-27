@@ -812,3 +812,45 @@ test("syncAgySubagentRoster preserves distinct keys for batch-spawned swarm work
   assert.equal(previewWithSwarm.length, 1);
   assert.match(previewWithSwarm[0]!, /Agent\(DeepInvestigator\)/);
 });
+
+test("AgySwarmBoardDashboard reflects remapped Pi keybindings in footer hints", () => {
+  const remappedKb = {
+    matches: () => false,
+    getKeys: (id: string) => {
+      if (id === "tui.input.tab") return ["ctrl+n"];
+      if (id === "tui.select.confirm") return ["ctrl+y"];
+      if (id === "tui.select.cancel") return ["ctrl+g"];
+      if (id === "tui.select.up") return ["up"];
+      if (id === "tui.select.down") return ["down"];
+      return [];
+    },
+  };
+  const dash = new AgySwarmBoardDashboard(
+    { terminal: { rows: 30, columns: 140 }, requestRender: () => {} } as any,
+    plainTheme,
+    remappedKb as any,
+    {
+      swarmId: "s-kb",
+      coordinatorConversationId: "s-kb",
+      dir: "/tmp/s-kb",
+      title: "Keybinding Hint Check",
+      members: [],
+      posts: [],
+      headSeq: 0,
+      workingCount: 0,
+      waitingCount: 0,
+      stoppedCount: 0,
+      killedCount: 0,
+      failedCount: 0,
+      done: false,
+      newestUpdateMs: 0,
+    },
+    async () => undefined,
+    () => {},
+  );
+  const rendered = dash.render(160).join("\n");
+  assert.match(rendered, /ctrl\+n\/←→ pane/);
+  assert.match(rendered, /ctrl\+y open/);
+  assert.match(rendered, /ctrl\+g close/);
+  dash.dispose();
+});

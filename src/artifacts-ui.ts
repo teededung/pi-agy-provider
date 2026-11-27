@@ -365,7 +365,7 @@ export class AgyArtifactsDashboard implements Component {
           "dim",
           this.preview
             ? `  ${configuredKeys(this.keybindings, "tui.select.up")}/${configuredKeys(this.keybindings, "tui.select.down")}/jk scroll · o open · ${configuredKeys(this.keybindings, "tui.select.cancel")} back`
-            : `  ${configuredKeys(this.keybindings, "tui.select.up")}/${configuredKeys(this.keybindings, "tui.select.down")}/jk select · enter/v preview markdown · o open · r rescan · ${configuredKeys(this.keybindings, "tui.select.cancel")} close`,
+            : `  ${configuredKeys(this.keybindings, "tui.select.up")}/${configuredKeys(this.keybindings, "tui.select.down")}/jk select · ${configuredKeys(this.keybindings, "tui.select.confirm")}/v preview markdown · o open · r rescan · ${configuredKeys(this.keybindings, "tui.select.cancel")} close`,
         ),
         width,
       ),

@@ -9,9 +9,9 @@
  */
 
 import type { JsonObject } from "@earendil-works/pi-ai";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Context, Data, Effect, Layer, ManagedRuntime, Exit, Cause, Result } from "effect";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { AgyAcpRpcError, type AcpAuthMethod } from "../lib/agy-acp-client.ts";
 import {
@@ -61,8 +61,7 @@ interface AntigravityRuntimeSettings {
 
 function getRuntimeSettings(): AntigravityRuntimeSettings {
   try {
-    const configDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-    const settingsPath = join(configDir, "settings.json");
+    const settingsPath = join(getAgentDir(), "settings.json");
     if (existsSync(settingsPath)) {
       const data = JSON.parse(readFileSync(settingsPath, "utf8"));
       const cfg = data["pi-agy"] ?? data["antigravity"];

@@ -554,6 +554,15 @@ export class AgySwarmBoardDashboard implements Component {
     return undefined;
   }
 
+  private keyLabel(
+    binding: "tui.input.tab" | "tui.select.confirm" | "tui.select.cancel",
+    fallback: string,
+  ): string {
+    const keys =
+      typeof this.keybindings?.getKeys === "function" ? this.keybindings.getKeys(binding) : [];
+    return keys[0] ?? fallback;
+  }
+
   private renderMemberDetail(width: number, totalHeight: number): string[] {
     const t = this.theme;
     const detail = this.memberDetail!;
@@ -578,7 +587,8 @@ export class AgySwarmBoardDashboard implements Component {
       t.fg("accent", t.bold(`🐝 ${detail.memberName}`)) +
       (member?.model ? t.fg("dim", ` · ${member.model}`) : "") +
       (member ? t.fg("muted", ` · ${member.status}`) : "");
-    const footer = t.fg("dim", "↑/↓ scroll · g/G top/end · r refresh · esc back to board");
+    const cancelKey = this.keyLabel("tui.select.cancel", "esc");
+    const footer = t.fg("dim", `↑/↓ scroll · g/G top/end · r refresh · ${cancelKey} back to board`);
     return [
       truncateToWidth(header, width, "…"),
       t.fg("borderMuted", "─".repeat(width)),
@@ -652,10 +662,13 @@ export class AgySwarmBoardDashboard implements Component {
       headerLines.push(truncateToWidth(t.fg("muted", snap.headline), safeWidth, "…"));
     }
 
+    const tabKey = this.keyLabel("tui.input.tab", "tab");
+    const confirmKey = this.keyLabel("tui.select.confirm", "enter");
+    const cancelKey = this.keyLabel("tui.select.cancel", "esc");
     const footerHelp = truncateToWidth(
       t.fg(
         "dim",
-        "tab/←→ pane · ↑/↓ move · enter open · [/] post · z zoom · p filter · f follow · o member log · r refresh · esc close",
+        `${tabKey}/←→ pane · ↑/↓ move · ${confirmKey} open · [/] post · z zoom · p filter · f follow · o member log · r refresh · ${cancelKey} close`,
       ),
       safeWidth,
       "…",

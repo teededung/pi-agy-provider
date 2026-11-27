@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { piConfigDir } from "./config.ts";
 import { PI_TOOLS_AGENT_DESCRIPTION } from "./prompt.ts";
 import { EAGER_PI_BRIDGE_TOOLS, PI_TOOLS_AGENT_NATIVE_TOOLS } from "./pi-tools-agent.ts";
 import { collectSwarmMemberConversationIds } from "./swarm.ts";
@@ -747,7 +748,7 @@ export function buildPiToolsTrajectoryMetadataFields(
   agentName: string,
   mcpDirectory?: string,
 ): Buffer {
-  const effectiveDir = mcpDirectory ?? path.join(os.homedir(), ".pi", "agent", "antigravity", "bridges", "default");
+  const effectiveDir = mcpDirectory ?? path.join(piConfigDir("antigravity"), "bridges", "default");
   const bridgeUri = pathToFileURL(effectiveDir).href;
   const agentFilePath = path.join(effectiveDir, ".agents", "agents", agentName, "agent.md");
   const agentUri = pathToFileURL(agentFilePath).href;

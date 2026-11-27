@@ -6,6 +6,8 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
+import { modelCacheFile } from "../index.ts";
+import { buildPiToolsTrajectoryMetadataFields } from "../lib/conversation-metadata.ts";
 import {
   AgyStallError,
   buildDriverAgyArgs,
@@ -349,6 +351,25 @@ test("extractToolCallsFromStepPayload decodes PlannerResponse toolSummary and pa
   });
   tracker.recordToolStart({ name: calls[0]!.name, args: calls[0]!.args }, "pi-test");
   assert.equal(tracker.get("pi-bridge-45"), "Read quest_db.yml around 21712");
+});
+
+test("Pi 1.7.0 --agent-dir / dynamic PI_CODING_AGENT_DIR is respected after module load", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "agy-agent-dir-170-"));
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  t.after(async () => {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  process.env.PI_CODING_AGENT_DIR = dir;
+  assert.equal(modelCacheFile(), path.join(dir, "antigravity", "model-list.json"));
+
+  const meta = buildPiToolsTrajectoryMetadataFields("pi-tools-170");
+  assert.ok(
+    meta.toString("utf8").includes(encodeURI(path.join(dir, "antigravity", "bridges", "default"))),
+    "default bridge URI must follow dynamic getAgentDir() rather than hardcoded ~/.pi/agent",
+  );
 });
 
 

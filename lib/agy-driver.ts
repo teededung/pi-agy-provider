@@ -1,3 +1,4 @@
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -1511,7 +1512,17 @@ function configuredDriverMode(env: NodeJS.ProcessEnv): string | undefined {
   const rawEnv = env.PI_ANTIGRAVITY_DRIVER?.trim().toLowerCase();
   if (rawEnv) return rawEnv;
   try {
-    const configDir = env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+    const rawAgentDir = env.PI_CODING_AGENT_DIR?.trim();
+    const configDir =
+      env === process.env
+        ? getAgentDir()
+        : rawAgentDir
+          ? rawAgentDir === "~"
+            ? homedir()
+            : rawAgentDir.startsWith("~/") || rawAgentDir.startsWith("~\\")
+              ? join(homedir(), rawAgentDir.slice(2))
+              : rawAgentDir
+          : join(homedir(), ".pi", "agent");
     const settingsPath = join(configDir, "settings.json");
     if (existsSync(settingsPath)) {
       const data = JSON.parse(readFileSync(settingsPath, "utf8"));
