@@ -18,6 +18,7 @@ import {
   prepareAgyConversationBridgeMetadata,
 } from "./conversation-metadata.ts";
 import { parseAgyLine } from "./events.ts";
+import { normalizeAgyOrchestratorConfig, type AgyOrchestratorConfig } from "./models.ts";
 import { agyToolStepKey, trackActiveToolStep } from "./tool-steps.ts";
 import {
   applyEvent,
@@ -99,6 +100,8 @@ export interface AgyTurnRequest {
    * writes, and shell commands are automatically denied in headless mode.
    */
   readOnlyPermissions?: boolean;
+  /** Optional custom Planner/Executor overrides passed via `--settings {"orchestrator":...}`. */
+  orchestrator?: AgyOrchestratorConfig;
   /** Non-argv bridge/catalog fingerprint used by persistent executors. */
   bridgeRevision?: string;
   /** Preflight-selected absolute binary. Normally resolved lazily. */
@@ -259,11 +262,13 @@ function appendProcessArgs(args: string[], request: AgyTurnRequest): string[] {
   return args;
 }
 
-export const READ_ONLY_AGY_SETTINGS_JSON = JSON.stringify({
+const READ_ONLY_AGY_SETTINGS_OBJECT = {
   agentMode: "",
   toolPermission: "strict",
   permissions: { allow: [] },
-});
+} as const;
+
+export const READ_ONLY_AGY_SETTINGS_JSON = JSON.stringify(READ_ONLY_AGY_SETTINGS_OBJECT);
 
 /** Scrub OAuth access tokens, Google API keys, and bridge tokens from surfaced stderr text. */
 export function redactAgySecrets(text: string): string {
@@ -353,17 +358,25 @@ export function extractAgyStderrSummary(stderr: string): string {
 }
 
 function permissionArgsForRequest(
-  request: Pick<AgyTurnRequest, "readOnlyPermissions" | "agent">,
+  request: Pick<AgyTurnRequest, "readOnlyPermissions" | "agent" | "orchestrator">,
 ): string[] {
+  const orchestrator = normalizeAgyOrchestratorConfig(request.orchestrator);
   // When a schema-enforced read-only / zero-tool agent (`pi-agy-readonly` or
   // `pi-agy-notools`) is active, mutating & shell tools are absent from the
   // model's tool list, so auto-approve read-only tools instead of passing
   // `toolPermission: "strict"` (which soft-denies even `ReadFile` and cancels
   // the cascade in headless `agy` print/stream-json mode).
   if (request.readOnlyPermissions && !isSchemaReadOnlyAgyAgent(request.agent)) {
-    return ["--settings", READ_ONLY_AGY_SETTINGS_JSON];
+    const settingsJson = orchestrator
+      ? JSON.stringify({ ...READ_ONLY_AGY_SETTINGS_OBJECT, orchestrator })
+      : READ_ONLY_AGY_SETTINGS_JSON;
+    return ["--settings", settingsJson];
   }
-  return ["--dangerously-skip-permissions"];
+  const args = ["--dangerously-skip-permissions"];
+  if (orchestrator) {
+    args.push("--settings", JSON.stringify({ orchestrator }));
+  }
+  return args;
 }
 
 export function buildOneShotAgyArgs(request: AgyTurnRequest): string[] {

@@ -14,6 +14,153 @@ export interface AgyModelInfo {
 }
 
 /**
+ * Custom Planner / Executor model overrides for Antigravity's `Orchestrator`
+ * two-phase Plan & Execute mode (matching `agy`'s `"orchestrator"` setting in
+ * `settings.json` and `--settings`). Each value is an effort-qualified agy
+ * model slug, e.g. `"gemini-4-neon-xhigh"` or `"claude-sonnet-5-5-high"`.
+ */
+export interface AgyOrchestratorConfig {
+  planner?: string;
+  executor?: string;
+}
+
+/** Official `agy 1.5.18` `orchestrator-model-roles` eligible families. */
+export const ORCHESTRATOR_PLANNER_BASES = [
+  "gemini-4-neon",
+  "gemini-4-carbon",
+  "gemini-4-argon",
+  "claude-opus-5-5",
+] as const;
+
+export const ORCHESTRATOR_EXECUTOR_BASES = [
+  "gemini-4-hydrogen",
+  "claude-sonnet-5-5",
+] as const;
+
+export function isAgyOrchestratorModel(modelId: string | undefined): boolean {
+  return typeof modelId === "string" && /^gemini-pro-orchestrator(?:$|[-@])/i.test(modelId.trim());
+}
+
+export function normalizeAgyOrchestratorConfig(raw: unknown): AgyOrchestratorConfig | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const rec = raw as Record<string, unknown>;
+  const planner = typeof rec.planner === "string" && rec.planner.trim() ? rec.planner.trim() : undefined;
+  const executor = typeof rec.executor === "string" && rec.executor.trim() ? rec.executor.trim() : undefined;
+  if (!planner && !executor) return undefined;
+  return {
+    ...(planner ? { planner } : {}),
+    ...(executor ? { executor } : {}),
+  };
+}
+
+export function getOrchestratorRoleCatalog(
+  role: "planner" | "executor",
+  models: readonly AgyModelInfo[] = ALL_FALLBACK_MODELS,
+): AgyModelInfo[] {
+  const bases: readonly string[] =
+    role === "planner" ? ORCHESTRATOR_PLANNER_BASES : ORCHESTRATOR_EXECUTOR_BASES;
+  const pool = mergeAgyModels([...models, ...ALL_FALLBACK_MODELS]);
+  const out: AgyModelInfo[] = [];
+  for (const baseId of bases) {
+    const found = pool.find((m) => m.id.toLowerCase() === baseId);
+    if (found) out.push(found);
+  }
+  return out;
+}
+
+/**
+ * Resolve a Planner or Executor model spec (e.g. `neon4`, `opus3`, `hydrogen2`,
+ * `sonnet:high`, or `gemini-4-neon-xhigh`) into an effort-qualified agy model
+ * slug restricted to the role's eligible model families.
+ */
+export function resolveOrchestratorRoleModel(
+  role: "planner" | "executor",
+  spec: string,
+  models: readonly AgyModelInfo[] = ALL_FALLBACK_MODELS,
+): string | undefined {
+  const trimmed = spec.trim();
+  if (!trimmed) return undefined;
+  const eligible = getOrchestratorRoleCatalog(role, models);
+  if (eligible.length === 0) return undefined;
+
+  let modelToken = trimmed;
+  let explicitEffort = effortFromId(trimmed);
+  if (explicitEffort) {
+    modelToken = trimmed.replace(EFFORT_SUFFIX, "");
+  } else {
+    const aliasMatch = trimmed.match(
+      /^(opus|sonnet|neon|argon|carbon|hydrogen|flash)(?:[-:]?(1|2|3|4|low|mid|medium|high|xhigh|extra|max))?$/i,
+    );
+    if (aliasMatch) {
+      modelToken = aliasMatch[1]!;
+      explicitEffort = parseConsultEffortToken(aliasMatch[2]);
+    } else {
+      const colonMatch = trimmed.match(
+        /^([a-z0-9][a-z0-9._-]*?):(1|2|3|4|low|mid|medium|high|xhigh|extra|max)$/i,
+      );
+      if (colonMatch) {
+        modelToken = colonMatch[1]!;
+        explicitEffort = parseConsultEffortToken(colonMatch[2]);
+      }
+    }
+  }
+
+  const key = modelToken.trim().toLowerCase();
+  const canonicalId = CONSULT_MODEL_ALIASES[key];
+  const matched =
+    (canonicalId ? eligible.find((m) => m.id.toLowerCase() === canonicalId) : undefined) ??
+    eligible.find((m) => m.id.toLowerCase() === key) ??
+    eligible.find((m) => m.id.toLowerCase().startsWith(key)) ??
+    eligible.find((m) => m.name.toLowerCase() === key);
+  if (!matched) return undefined;
+
+  // Match agy 1.5.17 default: prefer `high` when no effort is explicitly given.
+  const desiredEffort = explicitEffort ?? (matched.supportedEfforts.includes("high") ? "high" : matched.defaultEffort);
+  const resolvedEffort = resolveAgyModelEffort(matched, desiredEffort);
+  return resolvedEffort ? `${matched.id}-${resolvedEffort}` : matched.id;
+}
+
+const SHORT_MODEL_PREFIXES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^gemini-4-neon$/i, "neon"],
+  [/^gemini-4-carbon$/i, "carbon"],
+  [/^gemini-4-argon$/i, "argon"],
+  [/^gemini-4-hydrogen$/i, "hydrogen"],
+  [/^gemini-3\.8-flash$/i, "flash"],
+  [/^claude-opus-5-5$/i, "opus"],
+  [/^claude-sonnet-5-5$/i, "sonnet"],
+];
+
+export function formatAgyOrchestratorModelShort(modelId: string | undefined): string | undefined {
+  if (!modelId?.trim()) return undefined;
+  const trimmed = modelId.trim();
+  const effort = effortFromId(trimmed);
+  const base = effort ? trimmed.replace(EFFORT_SUFFIX, "") : trimmed;
+  let shortBase = base;
+  for (const [pattern, label] of SHORT_MODEL_PREFIXES) {
+    if (pattern.test(base)) {
+      shortBase = label;
+      break;
+    }
+  }
+  if (!effort) return shortBase;
+  const shortEffort = effort === "medium" ? "med" : effort;
+  return `${shortBase}-${shortEffort}`;
+}
+
+export function formatAgyOrchestratorBadge(
+  config: AgyOrchestratorConfig | undefined,
+): string | undefined {
+  const normalized = normalizeAgyOrchestratorConfig(config);
+  if (!normalized) return undefined;
+  const p = formatAgyOrchestratorModelShort(normalized.planner);
+  const e = formatAgyOrchestratorModelShort(normalized.executor);
+  if (p && e) return `${p} → ${e}`;
+  if (p) return `plan:${p}`;
+  if (e) return `exec:${e}`;
+  return undefined;
+}
+
+/**
  * Build Pi's `thinkingLevelMap` from a model's discovered `agy` effort variants
  * so `/thinking` and thinking-level cycling only expose levels `agy` actually
  * supports for that model (e.g. `low`, `medium`, `high`, and `xhigh` when
@@ -181,6 +328,21 @@ export const ALL_FALLBACK_MODELS: AgyModelInfo[] = [
     defaultEffort: "high",
   },
   {
+    id: "gemini-pro-orchestrator-neon",
+    name: "Orchestrator (Neon)",
+    supportedEfforts: [],
+  },
+  {
+    id: "gemini-pro-orchestrator",
+    name: "Orchestrator (Carbon)",
+    supportedEfforts: [],
+  },
+  {
+    id: "gemini-pro-orchestrator-argon",
+    name: "Orchestrator (Argon)",
+    supportedEfforts: [],
+  },
+  {
     id: "gemini-3.8-flash",
     name: "Gemini 3.8 Flash",
     supportedEfforts: ["high", "medium", "low"],
@@ -306,6 +468,8 @@ export const CONSULT_MODEL_ALIASES: Readonly<Record<string, string>> = {
   argon: "gemini-4-argon",
   carbon: "gemini-4-carbon",
   hydrogen: "gemini-4-hydrogen",
+  orch: "gemini-pro-orchestrator-neon",
+  orchestrator: "gemini-pro-orchestrator-neon",
   flash: "gemini-3.8-flash",
 };
 
@@ -375,7 +539,7 @@ export type ResolvedAgyConsultSpec =
     };
 
 export const CONSULT_USAGE_MESSAGE =
-  'Usage: /m <opus|sonnet|neon|argon|carbon|hydrogen|flash>[1|2|3|4] [prompt] (thinking: 1=low, 2=mid, 3=high, 4=xhigh, omit=session current)';
+  'Usage: /m <opus|sonnet|neon|argon|carbon|hydrogen|orch|flash>[1|2|3|4] [prompt] (thinking: 1=low, 2=mid, 3=high, 4=xhigh, omit=session current)';
 
 /**
  * Parse `/m <spec> [prompt]` arguments.
@@ -406,7 +570,7 @@ export function resolveAgyConsultSpec(
   let explicitEffort: AgyEffort | undefined;
 
   const aliasMatch = rawSpec.match(
-    /^(opus|sonnet|neon|argon|carbon|hydrogen|flash)(?:[-:]?(1|2|3|4|low|mid|medium|high|xhigh|extra|max))?$/i,
+    /^(opus|sonnet|neon|argon|carbon|hydrogen|orch|orchestrator|flash)(?:[-:]?(1|2|3|4|low|mid|medium|high|xhigh|extra|max))?$/i,
   );
   if (aliasMatch) {
     modelToken = aliasMatch[1]!;
@@ -425,7 +589,7 @@ export function resolveAgyConsultSpec(
   if (!model) {
     return {
       ok: false,
-      error: `Unknown model "${rawSpec}". Supported aliases: opus, sonnet, neon, argon, carbon, hydrogen, flash (with optional 1=low, 2=mid, 3=high, 4=xhigh).`,
+      error: `Unknown model "${rawSpec}". Supported aliases: opus, sonnet, neon, argon, carbon, hydrogen, orch, flash (with optional 1=low, 2=mid, 3=high, 4=xhigh).`,
     };
   }
 
@@ -461,21 +625,23 @@ export function getAgyConsultCompletions(
   if (argumentPrefix.includes(" ")) return null;
   const prefix = argumentPrefix.trim().toLowerCase();
   const activeId = currentModelId?.trim().toLowerCase();
-  const aliases = ["neon", "hydrogen", "carbon", "argon", "opus", "sonnet", "flash"] as const;
+  const aliases = ["neon", "hydrogen", "carbon", "argon", "orch", "opus", "sonnet", "flash"] as const;
   const items: Array<{ value: string; label: string; description: string }> = [];
 
   for (const alias of aliases) {
     const model = findAgyConsultModel(alias, models);
     const isCurrentModel = Boolean(activeId && model?.id.toLowerCase() === activeId);
-    if (isCurrentModel && !currentEffort) continue;
+    const hasEfforts = (model?.supportedEfforts.length ?? 0) > 0;
+    if (isCurrentModel && (!currentEffort || !hasEfforts)) continue;
     const modelLabel = model ? `${model.name} (${model.id})` : alias;
     if (!isCurrentModel) {
       items.push({
         value: `${alias} `,
         label: alias,
-        description: `${modelLabel} · session thinking`,
+        description: hasEfforts ? `${modelLabel} · session thinking` : `${modelLabel} · plan & execute`,
       });
     }
+    if (!hasEfforts) continue;
     const levels: Array<readonly [string, string, AgyEffort]> = [
       ["1", "low", "low"],
       ["2", "mid", "medium"],

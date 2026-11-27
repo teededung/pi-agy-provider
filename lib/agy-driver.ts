@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AcpAuthMethod, AcpQuotaSnapshot } from "./agy-acp-client.ts";
 import { AgyAcpDriverSession } from "./agy-acp-driver.ts";
-import type { AgyModelInfo } from "./models.ts";
+import { normalizeAgyOrchestratorConfig, type AgyModelInfo } from "./models.ts";
 import {
   AgyModelEffortFallbackError,
   AgySpawnError,
@@ -87,6 +87,7 @@ export interface AgyProcessConfigSnapshot {
   agent?: string;
   mode?: string;
   readOnlyPermissions?: boolean;
+  orchestrator?: string;
   bridgeRevision?: string;
 }
 
@@ -202,6 +203,7 @@ function processConfig(
 ): AgyProcessConfigSnapshot {
   const { baseModel, effort } = splitAgyModelEffort(request.model, request.effort);
   const useLegacySuffix = shouldUseLegacyEffortSuffix(request);
+  const orchestrator = normalizeAgyOrchestratorConfig(request.orchestrator);
   return {
     binary,
     binaryVersion,
@@ -213,6 +215,7 @@ function processConfig(
     agent: request.agent,
     mode: request.mode,
     ...(request.readOnlyPermissions ? { readOnlyPermissions: true } : {}),
+    ...(orchestrator ? { orchestrator: JSON.stringify(orchestrator) } : {}),
     bridgeRevision: request.bridgeRevision,
   };
 }
@@ -234,6 +237,7 @@ function recycleCause(
   if (current.mcpDirectory !== next.mcpDirectory) return "mcp-directory";
   if (current.model !== next.model) return "model";
   if (current.effort !== next.effort) return "effort";
+  if (current.orchestrator !== next.orchestrator) return "model";
   if (current.agent !== next.agent) return "agent";
   if (current.mode !== next.mode) return "mode";
   if (Boolean(current.readOnlyPermissions) !== Boolean(next.readOnlyPermissions)) return "mode";
@@ -1541,10 +1545,16 @@ export function createAgyTurnExecutorForMode(mode: AgyDriverMode): AgyTurnExecut
 export class SwitchableAgyTurnExecutor implements AgyTurnExecutor {
   #mode: AgyDriverMode;
   #current: AgyTurnExecutor;
+  #orchestratorDelegate: AgyTurnExecutor | undefined;
+  #createExecutor: (mode: AgyDriverMode) => AgyTurnExecutor;
 
-  constructor(initialMode: AgyDriverMode = "stream-json") {
+  constructor(
+    initialMode: AgyDriverMode = "stream-json",
+    options?: { createExecutor?: (mode: AgyDriverMode) => AgyTurnExecutor },
+  ) {
+    this.#createExecutor = options?.createExecutor ?? createAgyTurnExecutorForMode;
     this.#mode = initialMode;
-    this.#current = createAgyTurnExecutorForMode(initialMode);
+    this.#current = this.#createExecutor(initialMode);
   }
 
   get mode(): AgyDriverMode {
@@ -1561,12 +1571,25 @@ export class SwitchableAgyTurnExecutor implements AgyTurnExecutor {
 
   async switchMode(mode: AgyDriverMode): Promise<void> {
     if (mode === this.#mode) return;
-    await this.#current.close("recycle");
-    this.#current = createAgyTurnExecutorForMode(mode);
+    await Promise.all([
+      this.#current.close("recycle"),
+      this.#orchestratorDelegate?.close("recycle"),
+    ]);
+    this.#orchestratorDelegate = undefined;
+    this.#current = this.#createExecutor(mode);
     this.#mode = mode;
   }
 
   run(request: AgyTurnRequest): Promise<AgyTurnOutcome> {
+    // `agy acp` does not currently honor custom `"orchestrator"` Planner/Executor
+    // settings or accept `--settings`. Delegate custom Orchestrator turns to the
+    // persistent `stream-json` executor (sharing the same conversationId on disk).
+    if (this.#mode === "acp" && normalizeAgyOrchestratorConfig(request.orchestrator)) {
+      if (!this.#orchestratorDelegate) {
+        this.#orchestratorDelegate = this.#createExecutor("stream-json");
+      }
+      return this.#orchestratorDelegate.run(request);
+    }
     return this.#current.run(request);
   }
 
@@ -1574,8 +1597,14 @@ export class SwitchableAgyTurnExecutor implements AgyTurnExecutor {
     return this.#current.snapshot();
   }
 
-  close(reason: AgyExecutorCloseReason, cause?: AgyRecycleCause): Promise<void> {
-    return this.#current.close(reason, cause);
+  async close(reason: AgyExecutorCloseReason, cause?: AgyRecycleCause): Promise<void> {
+    await Promise.all([
+      this.#current.close(reason, cause),
+      this.#orchestratorDelegate?.close(reason, cause),
+    ]);
+    if (reason === "shutdown") {
+      this.#orchestratorDelegate = undefined;
+    }
   }
 
   authenticate(options?: {

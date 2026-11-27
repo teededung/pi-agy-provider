@@ -1,14 +1,20 @@
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import lockfile from "proper-lockfile";
 import { normalizeAgyDriverMode, type AgyDriverMode } from "./agy-driver.ts";
 import type { AgyFooterMode } from "./footer.ts";
+import { normalizeAgyOrchestratorConfig, type AgyOrchestratorConfig } from "./models.ts";
 import type { AgyToolMode } from "./tool-mode.ts";
 
 function settingsPath(): string {
   return path.join(getAgentDir(), "settings.json");
+}
+
+function nativeAgySettingsPath(): string {
+  return path.join(os.homedir(), ".gemini", "antigravity-cli", "settings.json");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -68,9 +74,51 @@ export function loadSavedAgyDriverMode(file = settingsPath()): AgyDriverMode | u
   return mode;
 }
 
+/** Read saved Pi Orchestrator Planner/Executor overrides under antigravity.orchestrator. */
+export function loadSavedAgyOrchestratorConfig(
+  file = settingsPath(),
+): AgyOrchestratorConfig | undefined {
+  const settings = readDocument(file).antigravity as Record<string, unknown> | undefined;
+  const raw = settings?.orchestrator;
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) {
+    throw new Error("Pi settings antigravity.orchestrator must contain an object.");
+  }
+  return normalizeAgyOrchestratorConfig(raw);
+}
+
+/** Best-effort read of native agy `~/.gemini/antigravity-cli/settings.json` `"orchestrator"`. */
+export function loadNativeAgyOrchestratorConfig(
+  file = nativeAgySettingsPath(),
+): AgyOrchestratorConfig | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
+    if (!isRecord(parsed)) return undefined;
+    return normalizeAgyOrchestratorConfig(parsed.orchestrator);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolve effective Orchestrator Planner/Executor config (Pi override wins, else native agy settings). */
+export function loadEffectiveAgyOrchestratorConfig(
+  piFile = settingsPath(),
+  agyFile = nativeAgySettingsPath(),
+): { config?: AgyOrchestratorConfig; source: "pi" | "agy" | "default" } {
+  try {
+    const saved = loadSavedAgyOrchestratorConfig(piFile);
+    if (saved) return { config: saved, source: "pi" };
+  } catch {
+    // Fall through to native agy settings on malformed Pi settings.
+  }
+  const native = loadNativeAgyOrchestratorConfig(agyFile);
+  if (native) return { config: native, source: "agy" };
+  return { source: "default" };
+}
+
 async function saveAntigravitySetting(
-  key: "toolMode" | "footer" | "driver",
-  value: string,
+  key: "toolMode" | "footer" | "driver" | "orchestrator",
+  value: unknown,
   file = settingsPath(),
 ): Promise<void> {
   await withFileMutationQueue(file, async () => {
@@ -79,10 +127,15 @@ async function saveAntigravitySetting(
     const temporary = `${file}.${randomUUID()}.tmp`;
     try {
       const document = readDocument(file);
-      document.antigravity = {
+      const nextAntigravity: Record<string, unknown> = {
         ...(document.antigravity as Record<string, unknown> | undefined),
-        [key]: value,
       };
+      if (value === undefined) {
+        delete nextAntigravity[key];
+      } else {
+        nextAntigravity[key] = value;
+      }
+      document.antigravity = nextAntigravity;
       if (key === "driver" && isRecord(document["pi-agy"]) && "driver" in document["pi-agy"]) {
         const nextPiAgy = { ...document["pi-agy"] };
         delete nextPiAgy.driver;
@@ -116,4 +169,12 @@ export async function saveAgyFooterMode(mode: AgyFooterMode, file = settingsPath
 /** Persist the driver preference ("acp" | "stream-json" | "one-shot") under antigravity.driver. */
 export async function saveAgyDriverMode(mode: AgyDriverMode, file = settingsPath()): Promise<void> {
   await saveAntigravitySetting("driver", mode, file);
+}
+
+/** Persist (or clear when undefined) custom Orchestrator Planner/Executor overrides under antigravity.orchestrator. */
+export async function saveAgyOrchestratorConfig(
+  config: AgyOrchestratorConfig | undefined,
+  file = settingsPath(),
+): Promise<void> {
+  await saveAntigravitySetting("orchestrator", normalizeAgyOrchestratorConfig(config), file);
 }

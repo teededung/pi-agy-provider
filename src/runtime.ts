@@ -30,6 +30,7 @@ import {
   type AgyTurnExecutor,
 } from "../lib/agy-driver.ts";
 import type { AgyExecutionMode } from "../lib/agy-profile.ts";
+import type { AgyOrchestratorConfig } from "../lib/models.ts";
 import {
   detachAgyConversationBridgeMetadata,
   prepareAgyConversationBridgeMetadata,
@@ -220,6 +221,7 @@ export interface AntigravityRuntimeShape {
     readonly agent?: string;
     readonly mode?: AgyExecutionMode;
     readonly readOnlyPermissions?: boolean;
+    readonly orchestrator?: AgyOrchestratorConfig;
     readonly mcpDirectory?: string;
     readonly bridgeRevision?: string;
     readonly signal?: AbortSignal;
@@ -575,6 +577,7 @@ const makeRuntime = (
                 agent: request.agent,
                 mode: request.mode,
                 readOnlyPermissions: request.readOnlyPermissions,
+                ...(request.orchestrator ? { orchestrator: request.orchestrator } : {}),
                 mcpDirectory: request.mcpDirectory,
                 bridgeRevision: request.bridgeRevision,
                 cwd,

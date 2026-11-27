@@ -57,15 +57,20 @@ export function parseAgyAutoCompactOverride(
 export function resolveAgyEffectiveContextLimit(
   modelId?: string,
   env: NodeJS.ProcessEnv = process.env,
+  orchestrator?: { planner?: string },
 ): number {
   let defaultLimit = AGY_EFFECTIVE_CONTEXT_LIMIT;
   let maxWindow = AGY_EFFECTIVE_CONTEXT_LIMIT;
-  if (typeof modelId === "string") {
-    const trimmed = modelId.trim();
-    if (AGY_1M_CLAUDE_MODEL_RE.test(trimmed)) {
+  const trimmedModel = typeof modelId === "string" ? modelId.trim() : "";
+  const effectiveModelId =
+    /^gemini-pro-orchestrator(?:$|[-@])/i.test(trimmedModel) && orchestrator?.planner?.trim()
+      ? orchestrator.planner.trim()
+      : trimmedModel;
+  if (effectiveModelId) {
+    if (AGY_1M_CLAUDE_MODEL_RE.test(effectiveModelId)) {
       defaultLimit = AGY_CLAUDE_CONTEXT_LIMIT;
       maxWindow = AGY_CLAUDE_CONTEXT_LIMIT;
-    } else if (AGY_GEMINI4_MODEL_RE.test(trimmed)) {
+    } else if (AGY_GEMINI4_MODEL_RE.test(effectiveModelId)) {
       defaultLimit = AGY_GEMINI4_CONTEXT_LIMIT;
       maxWindow = AGY_CLAUDE_CONTEXT_LIMIT;
     }
@@ -153,6 +158,10 @@ export interface FooterRenderInput {
   modelId?: string;
   reasoning?: boolean;
   thinkingLevel?: string;
+  /** Compact Planner -> Executor badge shown next to Orchestrator models on Row 1. */
+  orchestratorBadge?: string;
+  /** Effective Planner model ID used to resolve the Orchestrator context window ceiling. */
+  orchestratorPlannerModelId?: string;
   routedModel?: { id: string; thinkingLevel?: string };
   availableProviderCount?: number;
   /** Live or branch-derived agy context tokens (uncached input + cacheRead). */
@@ -459,6 +468,9 @@ export function renderFooterLines(input: FooterRenderInput): string[] {
     rightWithoutProvider +=
       theme.fg("dim", " • ") +
       theme.fg("muted", level === "off" ? "thinking off" : level);
+  } else if (input.orchestratorBadge) {
+    rightWithoutProvider +=
+      theme.fg("dim", " • ") + theme.fg("muted", input.orchestratorBadge);
   }
   if (input.routedModel) {
     const routedLevel = input.routedModel.thinkingLevel
@@ -488,7 +500,13 @@ export function renderFooterLines(input: FooterRenderInput): string[] {
       ? Math.max(contextTokens, input.agyContextTokens)
       : (contextTokens ?? input.agyContextTokens);
   const limitTokens = isAntigravity
-    ? resolveAgyEffectiveContextLimit(input.routedModel?.id ?? input.modelId)
+    ? resolveAgyEffectiveContextLimit(
+        input.routedModel?.id ?? input.modelId,
+        process.env,
+        input.orchestratorPlannerModelId
+          ? { planner: input.orchestratorPlannerModelId }
+          : undefined,
+      )
     : (input.contextUsage?.contextWindow || input.modelContextWindow || 0);
 
   const hasUsed = typeof usedTokens === "number" && Number.isFinite(usedTokens) && usedTokens >= 0;

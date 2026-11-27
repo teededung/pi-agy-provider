@@ -8,8 +8,8 @@ import which from "which";
 import { killAgyTree, trackAgyChild, untrackAgyChild } from "./agy-children.ts";
 
 export const MIN_AGY_VERSION = "1.1.22";
-/** Soft target: includes ACP session/cancel, subagent approval, -32002 missing-session, and swarm/quota fixes through agy 1.5.16. */
-export const RECOMMENDED_AGY_VERSION = "1.5.16";
+/** Soft target: includes ACP session/cancel, subagent approval, -32002 missing-session, Orchestrator Planner/Executor settings, and swarm/quota fixes through agy 1.5.18. */
+export const RECOMMENDED_AGY_VERSION = "1.5.18";
 export const AGY_UPDATE_STEPS_MIN_VERSION = "1.5.16";
 export function isBelowRecommendedAgy(version: string | undefined): boolean {
   return Boolean(version && valid(version) && !gte(version, RECOMMENDED_AGY_VERSION));

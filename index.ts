@@ -80,10 +80,12 @@ import { parseAgyAgents, readAgyProcessProfile } from "./lib/agy-profile.ts";
 import { createPiToolsAgent } from "./lib/pi-tools-agent.ts";
 import { readAgyToolMode, resolveAgyToolModeCommand, type AgyToolMode } from "./lib/tool-mode.ts";
 import {
+  loadEffectiveAgyOrchestratorConfig,
   loadSavedAgyFooterMode,
   loadSavedAgyToolMode,
   saveAgyDriverMode,
   saveAgyFooterMode,
+  saveAgyOrchestratorConfig,
   saveAgyToolMode,
 } from "./lib/tool-mode-settings.ts";
 import { removeMcpCacheEntry } from "./lib/mcp-cache.ts";
@@ -105,17 +107,23 @@ import {
   capabilitiesForModel,
   FALLBACK_MODELS,
   formatAgyConsultLabel,
+  formatAgyOrchestratorBadge,
   formatConsultCompactionWarning,
   getAgyConsultCompletions,
+  getOrchestratorRoleCatalog,
   isAgyModelHidden,
+  isAgyOrchestratorModel,
   mergeAgyModels,
   modelCacheIsFresh,
+  normalizeAgyOrchestratorConfig,
   parseAgyModels,
   pricingForModel,
   resolveAgyConsultSpec,
   resolveAgyModelEffort,
+  resolveOrchestratorRoleModel,
   thinkingLevelMapForModel,
   type AgyModelInfo,
+  type AgyOrchestratorConfig,
 } from "./lib/models.ts";
 import type { AgyActivity } from "./lib/reducer.ts";
 import {
@@ -272,10 +280,11 @@ interface ModelCache {
 export function toProviderModel(model: AgyModelInfo): ProviderModelConfig {
   const capabilities = capabilitiesForModel(model.id);
   const thinkingLevelMap = thinkingLevelMapForModel(model);
+  const reasoning = !isAgyOrchestratorModel(model.id) || model.supportedEfforts.length > 0;
   return {
     id: model.id,
     name: model.name,
-    reasoning: true,
+    reasoning,
     ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
     input: ["text", "image"],
     cost: pricingForModel(model.id),
@@ -989,6 +998,10 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
                     ? postCompactionEstimatedTokens
                     : undefined))
                 : cachedFootprint.nonAgyFallbackTokens;
+            const orchState =
+              model?.provider === "antigravity" && isAgyOrchestratorModel(model?.id)
+                ? getOrchestratorState()
+                : undefined;
             return renderFooterLines({
               width,
               cwd,
@@ -998,6 +1011,8 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
               modelId: model?.id,
               reasoning: model?.reasoning,
               thinkingLevel,
+              orchestratorBadge: formatAgyOrchestratorBadge(orchState?.config),
+              orchestratorPlannerModelId: orchState?.config?.planner,
               availableProviderCount: footerData.getAvailableProviderCount(),
               agyContextTokens: effectiveAgyTokens,
               modelContextWindow: model?.contextWindow,
@@ -2156,6 +2171,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
         },
         isGrillActive,
         isSwarmActive,
+        () => refreshOrchestratorState().config,
       ),
     });
   };
@@ -2988,8 +3004,259 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     },
   });
 
+  let cachedOrchestratorState: { config?: AgyOrchestratorConfig; source: "pi" | "agy" | "default" } =
+    loadEffectiveAgyOrchestratorConfig();
+
+  function refreshOrchestratorState(): {
+    config?: AgyOrchestratorConfig;
+    source: "pi" | "agy" | "default";
+  } {
+    cachedOrchestratorState = loadEffectiveAgyOrchestratorConfig();
+    return cachedOrchestratorState;
+  }
+
+  function getOrchestratorState(): {
+    config?: AgyOrchestratorConfig;
+    source: "pi" | "agy" | "default";
+  } {
+    return cachedOrchestratorState;
+  }
+
+  function formatOrchestratorStatusLine(state = refreshOrchestratorState()): string {
+    const badge = formatAgyOrchestratorBadge(state.config);
+    if (!badge) return "preset default";
+    const srcTag = state.source === "agy" ? " (from agy settings)" : "";
+    return `${badge}${srcTag}`;
+  }
+
+  async function pickOrchestratorRoleInteractive(
+    role: "planner" | "executor",
+    currentValue: string | undefined,
+    ctx: ExtensionCommandContext,
+  ): Promise<string | null | undefined> {
+    const roleLabel = role === "planner" ? "Planner" : "Executor";
+    const catalog = getOrchestratorRoleCatalog(role, currentCache.models);
+    const RESET_LABEL = "Preset default (clear override)";
+    const modelOptions = [
+      ...catalog.map((m) => `${m.name} (${m.id})`),
+      RESET_LABEL,
+    ];
+    const pickedModel = await ctx.ui.select(
+      `Select Orchestrator ${roleLabel} model (current: ${currentValue ?? "preset default"})`,
+      modelOptions,
+    );
+    if (!pickedModel) return undefined;
+    if (pickedModel === RESET_LABEL) return null;
+    const chosen = catalog.find((m) => pickedModel.endsWith(`(${m.id})`));
+    if (!chosen) return undefined;
+    if (chosen.supportedEfforts.length === 0) return chosen.id;
+    const effortOrder = ["low", "medium", "high", "xhigh", "max"] as const;
+    const efforts = effortOrder.filter((e) => chosen.supportedEfforts.includes(e));
+    const pickedEffort = await ctx.ui.select(
+      `Select ${roleLabel} Effort for ${chosen.name}`,
+      efforts,
+    );
+    if (!pickedEffort) return undefined;
+    return `${chosen.id}-${pickedEffort}`;
+  }
+
+  async function persistOrchestratorConfig(
+    nextConfig: AgyOrchestratorConfig | undefined,
+    ctx: ExtensionCommandContext,
+  ): Promise<void> {
+    const normalized = normalizeAgyOrchestratorConfig(nextConfig);
+    try {
+      await saveAgyOrchestratorConfig(normalized);
+      refreshOrchestratorState();
+      invalidateFooter?.();
+      requestFooterRender?.();
+      const label = formatOrchestratorStatusLine(cachedOrchestratorState);
+      ctx.ui.notify(
+        normalized
+          ? `antigravity: orchestrator set to ${label} (planner=${normalized.planner ?? "preset"}, executor=${normalized.executor ?? "preset"}).`
+          : `antigravity: cleared Pi orchestrator override (effective: ${label}).`,
+        "info",
+      );
+    } catch (error) {
+      ctx.ui.notify(
+        `antigravity: could not save orchestrator settings (${error instanceof Error ? error.message : String(error)}).`,
+        "error",
+      );
+    }
+  }
+
+  async function handleAgyOrchestratorCommand(
+    args: string,
+    ctx: ExtensionCommandContext,
+  ): Promise<void> {
+    const trimmed = args.trim();
+    const parts = trimmed ? trimmed.split(/\s+/) : [];
+    const first = parts[0]?.toLowerCase() ?? "";
+
+    const notifyStatus = () => {
+      const state = refreshOrchestratorState();
+      const planner = state.config?.planner ?? "preset default";
+      const executor = state.config?.executor ?? "preset default";
+      const sourceNote =
+        state.source === "pi"
+          ? "Pi settings (antigravity.orchestrator)"
+          : state.source === "agy"
+            ? "agy settings (~/.gemini/antigravity-cli/settings.json)"
+            : "preset defaults";
+      ctx.ui.notify(
+        `antigravity orchestrator (${sourceNote}):\n- planner: ${planner}\n- executor: ${executor}\nUse /agy-orchestrator to configure interactively, or /agy-orchestrator <planner> <executor> (e.g. neon4 hydrogen2, opus3 sonnet3).`,
+        "info",
+      );
+    };
+
+    if (!first) {
+      if (ctx.hasUI && typeof ctx.ui.select === "function") {
+        while (true) {
+          const state = refreshOrchestratorState();
+          const current = state.config ?? {};
+          const DONE = "Done";
+          const RESET = "Reset to preset defaults";
+          const choice = await ctx.ui.select(
+            `Orchestrator Planner / Executor (${formatOrchestratorStatusLine(state)})`,
+            [
+              `Planner  (current: ${current.planner ?? "preset default"})`,
+              `Executor (current: ${current.executor ?? "preset default"})`,
+              RESET,
+              DONE,
+            ],
+          );
+          if (!choice || choice === DONE) return;
+          if (choice === RESET) {
+            await persistOrchestratorConfig(undefined, ctx);
+            return;
+          }
+          if (choice.startsWith("Planner")) {
+            const picked = await pickOrchestratorRoleInteractive("planner", current.planner, ctx);
+            if (picked === undefined) continue;
+            await persistOrchestratorConfig(
+              { ...current, planner: picked ?? undefined },
+              ctx,
+            );
+            continue;
+          }
+          if (choice.startsWith("Executor")) {
+            const picked = await pickOrchestratorRoleInteractive("executor", current.executor, ctx);
+            if (picked === undefined) continue;
+            await persistOrchestratorConfig(
+              { ...current, executor: picked ?? undefined },
+              ctx,
+            );
+          }
+        }
+      }
+      notifyStatus();
+      return;
+    }
+
+    if (first === "status" || first === "show") {
+      notifyStatus();
+      return;
+    }
+
+    if (first === "reset" || first === "default" || first === "clear" || first === "off") {
+      await persistOrchestratorConfig(undefined, ctx);
+      return;
+    }
+
+    if (first === "planner" || first === "executor") {
+      const role = first;
+      const valueSpec = parts.slice(1).join(" ").trim();
+      const state = refreshOrchestratorState();
+      const current = state.config ?? {};
+      if (!valueSpec) {
+        if (ctx.hasUI && typeof ctx.ui.select === "function") {
+          const picked = await pickOrchestratorRoleInteractive(role, current[role], ctx);
+          if (picked === undefined) return;
+          await persistOrchestratorConfig({ ...current, [role]: picked ?? undefined }, ctx);
+          return;
+        }
+        notifyStatus();
+        return;
+      }
+      if (/^(?:default|reset|clear|none|off)$/i.test(valueSpec)) {
+        await persistOrchestratorConfig({ ...current, [role]: undefined }, ctx);
+        return;
+      }
+      const resolved = resolveOrchestratorRoleModel(role, valueSpec, currentCache.models);
+      if (!resolved) {
+        const eligible = getOrchestratorRoleCatalog(role, currentCache.models)
+          .map((m) => m.id)
+          .join(", ");
+        ctx.ui.notify(
+          `agy-orchestrator: invalid ${role} "${valueSpec}". Eligible ${role}s: ${eligible} (append 1..4 or :low/:medium/:high/:xhigh).`,
+          "error",
+        );
+        return;
+      }
+      await persistOrchestratorConfig({ ...current, [role]: resolved }, ctx);
+      return;
+    }
+
+    // Shorthand: `/agy-orchestrator <planner> <executor>` (e.g. `neon4 hydrogen2`)
+    if (parts.length === 2) {
+      const plannerSpec = parts[0]!;
+      const executorSpec = parts[1]!;
+      const planner = /^(?:default|none|-)$/i.test(plannerSpec)
+        ? undefined
+        : resolveOrchestratorRoleModel("planner", plannerSpec, currentCache.models);
+      const executor = /^(?:default|none|-)$/i.test(executorSpec)
+        ? undefined
+        : resolveOrchestratorRoleModel("executor", executorSpec, currentCache.models);
+      if (!/^(?:default|none|-)$/i.test(plannerSpec) && !planner) {
+        ctx.ui.notify(
+          `agy-orchestrator: invalid planner "${plannerSpec}". Eligible planners: neon, carbon, argon, opus (e.g. neon4, opus3).`,
+          "error",
+        );
+        return;
+      }
+      if (!/^(?:default|none|-)$/i.test(executorSpec) && !executor) {
+        ctx.ui.notify(
+          `agy-orchestrator: invalid executor "${executorSpec}". Eligible executors: hydrogen, sonnet (e.g. hydrogen2, sonnet3).`,
+          "error",
+        );
+        return;
+      }
+      await persistOrchestratorConfig({ planner, executor }, ctx);
+      return;
+    }
+
+    ctx.ui.notify(
+      'agy-orchestrator: usage "/agy-orchestrator [status | reset | planner <model> | executor <model> | <planner> <executor>]".',
+      "error",
+    );
+  }
+
+  pi.registerCommand("agy-orchestrator", {
+    description: "Configure Orchestrator Planner & Executor models and thinking efforts",
+    getArgumentCompletions: (prefix) =>
+      [
+        "status",
+        "reset",
+        "planner neon4",
+        "planner neon3",
+        "planner carbon3",
+        "planner argon3",
+        "planner opus3",
+        "executor hydrogen4",
+        "executor hydrogen3",
+        "executor hydrogen2",
+        "executor sonnet3",
+        "neon4 hydrogen3",
+        "opus3 hydrogen3",
+        "opus3 sonnet3",
+      ]
+        .filter((value) => value.startsWith(prefix))
+        .map((value) => ({ value, label: value })),
+    handler: handleAgyOrchestratorCommand,
+  });
+
   pi.registerCommand("agy-config", {
-    description: "Configure pi-agy settings (driver mode, custom footer)",
+    description: "Configure pi-agy settings (driver mode, custom footer, orchestrator)",
     getArgumentCompletions: (prefix) =>
       [
         "status",
@@ -3002,6 +3269,9 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
         "footer on",
         "footer off",
         "footer status",
+        "orchestrator",
+        "orchestrator status",
+        "orchestrator reset",
       ]
         .filter((value) => value.startsWith(prefix))
         .map((value) => ({ value, label: value })),
@@ -3054,8 +3324,9 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       const footer = getFooterMode();
       const envDriver = process.env.PI_ANTIGRAVITY_DRIVER?.trim();
       const driverNote = envDriver ? ` (env: ${envDriver})` : "";
+      const orch = formatOrchestratorStatusLine();
       ctx.ui.notify(
-        `antigravity config:\n- driver: ${driver}${driverNote}\n- footer: ${footer.toUpperCase()}`,
+        `antigravity config:\n- driver: ${driver}${driverNote}\n- footer: ${footer.toUpperCase()}\n- orchestrator: ${orch}`,
         "info",
       );
     };
@@ -3064,9 +3335,11 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       if (ctx.hasUI && typeof ctx.ui.select === "function") {
         const driver = await getActiveDriverMode();
         const footer = getFooterMode();
+        const orch = formatOrchestratorStatusLine();
         const choice = await ctx.ui.select("pi-agy configuration", [
           `Driver mode (current: ${driver})`,
           `Custom footer (current: ${footer.toUpperCase()})`,
+          `Orchestrator Planner/Executor (current: ${orch})`,
         ]);
         if (!choice) return;
         if (choice.startsWith("Driver mode")) {
@@ -3087,6 +3360,10 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
           );
           if (!picked) return;
           await handleAgyFooterCommand(picked, ctx);
+          return;
+        }
+        if (choice.startsWith("Orchestrator")) {
+          await handleAgyOrchestratorCommand("", ctx);
           return;
         }
       }
@@ -3126,8 +3403,13 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
       return;
     }
 
+    if (key === "orchestrator" || key === "orch") {
+      await handleAgyOrchestratorCommand(subArg, ctx);
+      return;
+    }
+
     ctx.ui.notify(
-      'agy-config: usage "/agy-config [status | driver [acp|stream-json|one-shot|status] | footer [on|off|status]]".',
+      'agy-config: usage "/agy-config [status | driver [acp|stream-json|one-shot|status] | footer [on|off|status] | orchestrator [...]]".',
       "error",
     );
   }

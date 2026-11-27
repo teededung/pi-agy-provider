@@ -44,10 +44,13 @@ import { restorableAgyGoalState } from "../lib/conversation-state.ts";
 import {
   ALL_FALLBACK_MODELS,
   extractAgyConsultFooter,
+  isAgyOrchestratorModel,
+  normalizeAgyOrchestratorConfig,
   pricingForModel,
   resolveAgyConsultSpec,
   resolveAgyModelEffort,
   type AgyModelInfo,
+  type AgyOrchestratorConfig,
 } from "../lib/models.ts";
 import { readAgyProcessProfile, type AgyProcessProfile } from "../lib/agy-profile.ts";
 import { ensureReadOnlyAgyAgent } from "../lib/pi-tools-agent.ts";
@@ -1285,6 +1288,8 @@ export function streamAntigravity(
   isGrillActive?: () => boolean,
   /** Whether `/swarm` coordinator mode is currently active. */
   isSwarmActive?: () => boolean,
+  /** Optional custom Planner/Executor overrides for Orchestrator models. */
+  getOrchestratorConfig?: () => AgyOrchestratorConfig | undefined,
 ) {
   let hadBoostInConversation = false;
   let hadTeamworkInConversation = false;
@@ -1623,13 +1628,20 @@ export function streamAntigravity(
             ? buildSideConversationSystemPrompt(systemPrompt, getSystemPromptRelay?.())
             : (getSystemPromptRelay?.() ?? systemPrompt);
 
+        const effectiveOrchestrator = isAgyOrchestratorModel(effectiveModelId)
+          ? normalizeAgyOrchestratorConfig(getOrchestratorConfig?.())
+          : undefined;
+        // Custom Orchestrator Planner/Executor overrides delegate to stream-json
+        // when running under ACP, so images/prompt sizing must follow stream-json.
+        const turnUsesAcp = executorMode === "acp" && !effectiveOrchestrator;
+
         // Only persist user images to disk and append file-path instructions when
         // running on a text-only executor; ACP delivers native `type: "image"` blocks.
         let turnPromptWithImages = turnPrompt;
         if (
           !summaryRequest &&
           !sideSummaryRequest &&
-          executorMode !== "acp" &&
+          !turnUsesAcp &&
           userBatch.extractedImages.length > 0
         ) {
           const savedImagePaths: string[] = [];
@@ -1650,7 +1662,7 @@ export function streamAntigravity(
         const effectiveTurnPrompt = summaryRequest
           ? boundSummarizationPrompt(
               turnPromptWithImages,
-              executorMode === "acp"
+              turnUsesAcp
                 ? MAX_ACP_SUMMARIZATION_PROMPT_CHARS
                 : MAX_AGY_SUMMARIZATION_PROMPT_CHARS,
             )
@@ -1670,7 +1682,7 @@ export function streamAntigravity(
             : undefined;
 
         const acpImages =
-          !summaryRequest && !sideSummaryRequest && executorMode === "acp"
+          !summaryRequest && !sideSummaryRequest && turnUsesAcp
             ? [
                 ...userBatch.imageParts,
                 ...extractReferencedPromptImages(rawUserPrompt, turnCwd, userBatch.imageParts),
@@ -1718,6 +1730,7 @@ export function streamAntigravity(
                 : (readOnlyAgent ?? processProfile.agent),
             mode: processProfile.mode,
             readOnlyPermissions,
+            orchestrator: effectiveOrchestrator,
             mcpDirectory: processProfile.mcpDirectory,
             bridgeRevision,
             signal: options?.signal,
